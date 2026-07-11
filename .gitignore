@@ -1,0 +1,7 @@
+.DS_Store
+.build/
+.npm-cache/
+node_modules/
+dist/
+web-dist/
+*.sample.txt

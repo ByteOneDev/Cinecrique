@@ -1,0 +1,11 @@
+1
+00:00:00,500 --> 00:00:02,800
+La mer ouvre le cadre.
+
+2
+00:00:03,000 --> 00:00:05,400
+Le regard reste hors champ.
+
+3
+00:00:05,700 --> 00:00:08,500
+La distance devient un personnage.
