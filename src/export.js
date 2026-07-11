@@ -8,6 +8,7 @@ export const defaultExportSelection = () => ({
   currentFrame: false,
   allFrames: false,
   project: false,
+  portableProject: false,
 });
 
 export function safeExportBaseName(value) {
@@ -43,7 +44,6 @@ export function buildTextExportFiles(options, data) {
   if (options.markers) files.push({ name: `${base}-reperes.md`, content: markerMarkdown(data.markers, data.formatTimecode) });
   if (options.subtitles) files.push({ name: `${base}-sous-titres.vtt`, content: data.subtitlesVTT || "WEBVTT\n" });
   if (options.metadata) files.push({ name: `${base}-metadonnees.json`, content: JSON.stringify(data.metadata || {}, null, 2) });
-  if (options.project) files.push({ name: `${base}.cinecrique.json`, content: JSON.stringify(data.projectState, null, 2) });
   return files;
 }
 

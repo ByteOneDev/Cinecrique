@@ -3,6 +3,7 @@ import AppKit
 final class AppDelegate: NSObject, NSApplicationDelegate {
     private var window: NSWindow?
     private var webController: WebAppViewController?
+    private var pendingExternalFiles: [URL] = []
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         configureMainMenu()
@@ -28,6 +29,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         self.webController = controller
         self.window = window
 
+        if !pendingExternalFiles.isEmpty {
+            let files = pendingExternalFiles
+            pendingExternalFiles.removeAll()
+            controller.handleExternalFiles(files)
+        }
+
         NSApp.activate(ignoringOtherApps: true)
     }
 
@@ -36,7 +43,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     func application(_ application: NSApplication, open urls: [URL]) {
-        webController?.handleExternalFiles(urls)
+        guard !urls.isEmpty else { return }
+        if let webController {
+            webController.handleExternalFiles(urls)
+        } else {
+            pendingExternalFiles.append(contentsOf: urls)
+        }
     }
 
     @objc private func openVideo(_ sender: Any?) {

@@ -34,6 +34,20 @@
   <array>
     <dict>
       <key>CFBundleTypeName</key>
+      <string>Projet Cinécrique</string>
+      <key>CFBundleTypeRole</key>
+      <string>Editor</string>
+      <key>LSHandlerRank</key>
+      <string>Owner</string>
+      <key>CFBundleTypeIconFile</key>
+      <string>Cinecrique.icns</string>
+      <key>LSItemContentTypes</key>
+      <array>
+        <string>app.cinecrique.project</string>
+      </array>
+    </dict>
+    <dict>
+      <key>CFBundleTypeName</key>
       <string>Fichier vidéo</string>
       <key>CFBundleTypeRole</key>
       <string>Viewer</string>
@@ -59,6 +73,30 @@
         <string>ass</string>
         <string>ssa</string>
       </array>
+    </dict>
+  </array>
+  <key>UTExportedTypeDeclarations</key>
+  <array>
+    <dict>
+      <key>UTTypeIdentifier</key>
+      <string>app.cinecrique.project</string>
+      <key>UTTypeDescription</key>
+      <string>Projet Cinécrique</string>
+      <key>UTTypeConformsTo</key>
+      <array>
+        <string>public.data</string>
+      </array>
+      <key>UTTypeIconFile</key>
+      <string>Cinecrique.icns</string>
+      <key>UTTypeTagSpecification</key>
+      <dict>
+        <key>public.filename-extension</key>
+        <array>
+          <string>cinecrique</string>
+        </array>
+        <key>public.mime-type</key>
+        <string>application/vnd.cinecrique.project</string>
+      </dict>
     </dict>
   </array>
 </dict>

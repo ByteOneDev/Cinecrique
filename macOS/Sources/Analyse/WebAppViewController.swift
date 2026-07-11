@@ -43,6 +43,9 @@ final class WebAppViewController: NSViewController, WKNavigationDelegate {
         super.init(nibName: nil, bundle: nil)
 
         bridge.webView = webView
+        bridge.onFrontendReady = { [weak self] in
+            self?.markFrontendReady()
+        }
         webView.navigationDelegate = self
         webView.allowsMagnification = false
         webView.allowsLinkPreview = false
@@ -82,6 +85,7 @@ final class WebAppViewController: NSViewController, WKNavigationDelegate {
     }
 
     func reload() {
+        isReady = false
         webView.reload()
     }
 
@@ -108,10 +112,18 @@ final class WebAppViewController: NSViewController, WKNavigationDelegate {
             isReady = false
             return
         }
-        isReady = true
         webView.evaluateJavaScript(
             "window.__ANALYSE_NATIVE_READY__ = true; window.dispatchEvent(new CustomEvent('analyse:native-ready'));"
         )
+    }
+
+    func webView(_ webView: WKWebView, didStartProvisionalNavigation navigation: WKNavigation!) {
+        isReady = false
+    }
+
+    private func markFrontendReady() {
+        guard let url = webView.url, AppURLPolicy.isTrustedAppURL(url) else { return }
+        isReady = true
         if !pendingFiles.isEmpty {
             let files = pendingFiles
             pendingFiles.removeAll()

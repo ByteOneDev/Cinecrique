@@ -39,7 +39,11 @@ export function migratePersistedState(state, frameRateForProject = () => 24) {
   if (!state || typeof state !== "object" || Array.isArray(state)) {
     throw new TypeError("Le fichier de projet n’est pas un objet valide.");
   }
-  if (!Array.isArray(state.projects) || state.projects.length === 0 || state.projects.length > 500) {
+  if (
+    !Array.isArray(state.projects)
+    || state.projects.length > 500
+    || (state.projects.length === 0 && (Number(state.version) || 0) < 5)
+  ) {
     throw new TypeError("Le fichier de projet ne contient aucun projet valide.");
   }
 
@@ -58,6 +62,7 @@ export function migratePersistedState(state, frameRateForProject = () => 24) {
       title: String(project.title || "Projet sans titre").slice(0, 500),
       detail: String(project.detail || "Analyse locale").slice(0, 500),
       poster: String(project.poster || "./assets/poster-coast.png"),
+      archived: Boolean(project.archived),
     };
   });
 
@@ -68,13 +73,13 @@ export function migratePersistedState(state, frameRateForProject = () => 24) {
     project.id,
     migrateDocument(sourceDocuments[project.id] || {}, frameRateForProject(project)),
   ]));
-  const activeProjectId = projects.some((project) => project.id === state.activeProjectId)
+  const activeProjectId = projects.some((project) => project.id === state.activeProjectId && !project.archived)
     ? state.activeProjectId
-    : projects[0].id;
+    : projects.find((project) => !project.archived)?.id ?? null;
   const rawPanel = Number(state.preferences?.leftPanel);
 
   return {
-    version: 4,
+    version: 5,
     projects,
     activeProjectId,
     documents,
@@ -82,6 +87,50 @@ export function migratePersistedState(state, frameRateForProject = () => 24) {
       leftPanel: Number.isFinite(rawPanel) ? Math.min(Math.max(rawPanel, 43), 67) : 57,
       format: state.preferences?.format === "Markdown" ? "Markdown" : "Fountain",
       projectRailCollapsed: Boolean(state.preferences?.projectRailCollapsed),
+      muted: Boolean(state.preferences?.muted),
     },
+  };
+}
+
+export function renameProject(projects, projectId, title) {
+  const nextTitle = String(title || "").trim().slice(0, 500);
+  if (!nextTitle) return projects;
+  return (projects || []).map((project) => project.id === projectId ? { ...project, title: nextTitle } : project);
+}
+
+export function setProjectArchived(projects, projectId, archived) {
+  return (projects || []).map((project) => project.id === projectId
+    ? { ...project, archived: Boolean(archived) }
+    : project);
+}
+
+export function moveProject(projects, projectId, direction) {
+  const source = (projects || []).findIndex((project) => project.id === projectId);
+  if (source < 0 || ![-1, 1].includes(direction)) return projects;
+  const archived = Boolean(projects[source].archived);
+  const cohort = projects
+    .map((project, index) => ({ project, index }))
+    .filter((entry) => Boolean(entry.project.archived) === archived);
+  const cohortIndex = cohort.findIndex((entry) => entry.index === source);
+  const target = cohort[cohortIndex + direction]?.index;
+  if (target == null) return projects;
+  const next = [...projects];
+  [next[source], next[target]] = [next[target], next[source]];
+  return next;
+}
+
+export function removeProject(projects, documents, projectId, activeProjectId) {
+  const nextProjects = (projects || []).filter((project) => project.id !== projectId);
+  const nextDocuments = { ...(documents || {}) };
+  delete nextDocuments[projectId];
+  const activeStillAvailable = nextProjects.some((project) => (
+    project.id === activeProjectId && !project.archived
+  ));
+  return {
+    projects: nextProjects,
+    documents: nextDocuments,
+    activeProjectId: activeStillAvailable
+      ? activeProjectId
+      : nextProjects.find((project) => !project.archived)?.id ?? null,
   };
 }

@@ -1,10 +1,16 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
+  Archive,
+  ArrowCounterClockwise,
+  ArrowDown,
   ArrowUUpLeft,
+  ArrowUp,
   ArrowUpRight,
+  ArrowsDownUp,
   BookmarkSimple,
   CaretLeft,
   CaretRight,
+  CaretDown,
   Check,
   Circle,
   Columns,
@@ -27,6 +33,7 @@ import {
   MapPin,
   Note,
   Pause,
+  PencilSimple,
   Play,
   Plus,
   Package,
@@ -36,16 +43,24 @@ import {
   SkipBack,
   SkipForward,
   SlidersHorizontal,
+  SpeakerHigh,
+  SpeakerSlash,
   Subtitles,
   Trash,
   UploadSimple,
   X,
 } from "@phosphor-icons/react";
-import { metadataDuration, metadataFields, metadataFrameRate, parseSubtitles, projectDetail, subtitleAt } from "./media.js";
+import { isMuteShortcut, metadataDuration, metadataFields, metadataFrameRate, parseSubtitles, projectDetail, subtitleAt } from "./media.js";
 import { isNativeApp, nativeBridge } from "./native.js";
-import { migratePersistedState } from "./project.js";
+import {
+  migratePersistedState,
+  moveProject,
+  removeProject,
+  renameProject,
+  setProjectArchived,
+} from "./project.js";
 import { safeExternalURL } from "./security.js";
-import { annotationLabel, moveAnnotation, updatePointLabel } from "./annotations.js";
+import { annotationLabel, moveAnnotation, simplifyStroke, updatePointLabel } from "./annotations.js";
 import { buildTextExportFiles, defaultExportSelection, exportSelectionCount, safeExportBaseName } from "./export.js";
 import { fountainCompletion, fountainContext } from "./fountain.js";
 import {
@@ -55,6 +70,7 @@ import {
   parseTimecode,
   removeMarker,
   timelineKeyboardTarget,
+  timelinePointerTarget,
 } from "./markers.js";
 
 const FPS = 24;
@@ -194,6 +210,7 @@ function markerIcon(type, size = 16) {
 function AnnotationCanvas({
   annotations,
   activeTool,
+  pencilWidth,
   selectedAnnotationId,
   onAdd,
   onOpenNote,
@@ -202,7 +219,7 @@ function AnnotationCanvas({
   onDelete,
 }) {
   const canvasRef = useRef(null);
-  const [dragStart, setDragStart] = useState(null);
+  const [draftAnnotation, setDraftAnnotation] = useState(null);
   const [moving, setMoving] = useState(null);
 
   useEffect(() => {
@@ -219,15 +236,19 @@ function AnnotationCanvas({
       context.setTransform(ratio, 0, 0, ratio, 0, 0);
       context.clearRect(0, 0, rect.width, rect.height);
 
-      annotations.forEach((annotation) => {
+      const drawAnnotation = (annotation, isDraft = false) => {
         const selected = annotation.id === selectedAnnotationId;
         const gold = selected ? "#70cbd1" : "#e8ad3c";
-        context.lineWidth = selected ? 3 : 2;
+        context.save();
+        context.globalAlpha = isDraft ? 0.72 : 1;
+        context.lineWidth = annotation.type === "pencil"
+          ? Math.max(1, Number(annotation.width) || 4)
+          : selected ? 3 : 2;
         context.strokeStyle = gold;
         context.fillStyle = gold;
         context.lineCap = "round";
         context.lineJoin = "round";
-        context.setLineDash([]);
+        context.setLineDash(isDraft ? [7, 5] : []);
 
         if (annotation.type === "arrow") {
           const x1 = annotation.x1 * rect.width;
@@ -253,7 +274,7 @@ function AnnotationCanvas({
         }
 
         if (annotation.type === "rect") {
-          context.setLineDash([6, 4]);
+          context.setLineDash(isDraft ? [7, 5] : [6, 4]);
           context.strokeRect(
             annotation.x * rect.width,
             annotation.y * rect.height,
@@ -291,14 +312,41 @@ function AnnotationCanvas({
           context.textBaseline = "middle";
           context.fillText(String(annotation.label || 1), x, y + 0.5);
         }
-      });
+
+        if (annotation.type === "pencil") {
+          const points = Array.isArray(annotation.points) ? annotation.points : [];
+          if (points.length) {
+            context.beginPath();
+            context.moveTo(points[0].x * rect.width, points[0].y * rect.height);
+            points.slice(1).forEach((point) => context.lineTo(point.x * rect.width, point.y * rect.height));
+            context.stroke();
+          }
+          if (selected && points.length) {
+            const xs = points.map((point) => point.x * rect.width);
+            const ys = points.map((point) => point.y * rect.height);
+            const padding = 7;
+            context.lineWidth = 1;
+            context.setLineDash([4, 3]);
+            context.strokeRect(
+              Math.min(...xs) - padding,
+              Math.min(...ys) - padding,
+              Math.max(...xs) - Math.min(...xs) + padding * 2,
+              Math.max(...ys) - Math.min(...ys) + padding * 2,
+            );
+          }
+        }
+        context.restore();
+      };
+
+      annotations.forEach((annotation) => drawAnnotation(annotation));
+      if (draftAnnotation) drawAnnotation(draftAnnotation, true);
     };
 
     const observer = new ResizeObserver(draw);
     observer.observe(host);
     draw();
     return () => observer.disconnect();
-  }, [annotations, selectedAnnotationId]);
+  }, [annotations, draftAnnotation, selectedAnnotationId]);
 
   const normalizedPoint = (event) => {
     const rect = event.currentTarget.getBoundingClientRect();
@@ -337,18 +385,28 @@ function AnnotationCanvas({
           annotation.y2 * rect.height,
         ) <= 12;
       }
+      if (annotation.type === "pencil") {
+        const points = Array.isArray(annotation.points) ? annotation.points : [];
+        return points.some((point, index) => index > 0 && distanceToSegment(
+          points[index - 1].x * rect.width,
+          points[index - 1].y * rect.height,
+          point.x * rect.width,
+          point.y * rect.height,
+        ) <= Math.max(10, (Number(annotation.width) || 4) / 2 + 5));
+      }
       return false;
     }) || null;
   };
 
   const handlePointerDown = (event) => {
+    if (event.button !== 0) return;
     const point = normalizedPoint(event);
-    event.currentTarget.setPointerCapture(event.pointerId);
     const hit = hitTest(event);
     if (hit) {
+      event.currentTarget.setPointerCapture(event.pointerId);
       onSelect(hit.id);
       setMoving({ start: point, original: hit });
-      setDragStart(null);
+      setDraftAnnotation(null);
       return;
     }
     onSelect(null);
@@ -360,42 +418,91 @@ function AnnotationCanvas({
       onAdd({ id: crypto.randomUUID(), type: "point", ...point, label: annotations.length + 1 });
       return;
     }
-    setDragStart(point);
+    event.currentTarget.setPointerCapture(event.pointerId);
+    if (activeTool === "pencil") {
+      setDraftAnnotation({ type: "pencil", points: [point], width: pencilWidth });
+    } else if (activeTool === "arrow") {
+      setDraftAnnotation({ type: "arrow", x1: point.x, y1: point.y, x2: point.x, y2: point.y });
+    } else if (activeTool === "rect") {
+      setDraftAnnotation({ type: "rect", x: point.x, y: point.y, width: 0, height: 0, origin: point });
+    }
   };
 
   const handlePointerMove = (event) => {
-    if (!moving) return;
     const point = normalizedPoint(event);
-    onUpdate(moving.original.id, moveAnnotation(
-      moving.original,
-      point.x - moving.start.x,
-      point.y - moving.start.y,
-    ));
+    if (moving) {
+      onUpdate(moving.original.id, moveAnnotation(
+        moving.original,
+        point.x - moving.start.x,
+        point.y - moving.start.y,
+      ));
+      return;
+    }
+    if (!draftAnnotation) return;
+    setDraftAnnotation((current) => {
+      if (!current) return current;
+      if (current.type === "arrow") return { ...current, x2: point.x, y2: point.y };
+      if (current.type === "rect") {
+        return {
+          ...current,
+          x: Math.min(current.origin.x, point.x),
+          y: Math.min(current.origin.y, point.y),
+          width: Math.abs(point.x - current.origin.x),
+          height: Math.abs(point.y - current.origin.y),
+        };
+      }
+      if (current.type === "pencil") {
+        const previous = current.points.at(-1);
+        if (Math.hypot(point.x - previous.x, point.y - previous.y) < 0.0015) return current;
+        return { ...current, points: [...current.points, point] };
+      }
+      return current;
+    });
   };
 
   const handlePointerUp = (event) => {
+    if (event.currentTarget.hasPointerCapture(event.pointerId)) {
+      event.currentTarget.releasePointerCapture(event.pointerId);
+    }
     if (moving) {
       setMoving(null);
       return;
     }
-    if (!dragStart || !["arrow", "rect"].includes(activeTool)) return;
+    if (!draftAnnotation) return;
     const end = normalizedPoint(event);
-    if (activeTool === "arrow") {
-      onAdd({ id: crypto.randomUUID(), type: "arrow", x1: dragStart.x, y1: dragStart.y, x2: end.x, y2: end.y });
-    } else {
-      onAdd({
-        id: crypto.randomUUID(),
-        type: "rect",
-        x: Math.min(dragStart.x, end.x),
-        y: Math.min(dragStart.y, end.y),
-        width: Math.abs(end.x - dragStart.x),
-        height: Math.abs(end.y - dragStart.y),
-      });
+    let committed = draftAnnotation.type === "arrow"
+      ? { ...draftAnnotation, x2: end.x, y2: end.y }
+      : draftAnnotation.type === "rect"
+        ? {
+          ...draftAnnotation,
+          x: Math.min(draftAnnotation.origin.x, end.x),
+          y: Math.min(draftAnnotation.origin.y, end.y),
+          width: Math.abs(end.x - draftAnnotation.origin.x),
+          height: Math.abs(end.y - draftAnnotation.origin.y),
+        }
+        : draftAnnotation.type === "pencil"
+          ? { ...draftAnnotation, points: [...draftAnnotation.points, end] }
+          : draftAnnotation;
+    if (committed.type === "rect") {
+      const { origin: _origin, ...rectangle } = committed;
+      committed = rectangle;
+      if (committed.width < 0.005 || committed.height < 0.005) committed = null;
+    } else if (committed.type === "arrow") {
+      if (Math.hypot(committed.x2 - committed.x1, committed.y2 - committed.y1) < 0.005) committed = null;
+    } else if (committed.type === "pencil") {
+      const points = simplifyStroke(committed.points);
+      committed = points.length > 1 ? { ...committed, points } : null;
     }
-    setDragStart(null);
+    if (committed) onAdd({ ...committed, id: crypto.randomUUID() });
+    setDraftAnnotation(null);
   };
 
   const handleKeyDown = (event) => {
+    if (event.key === "Escape" && draftAnnotation) {
+      event.preventDefault();
+      setDraftAnnotation(null);
+      return;
+    }
     const selected = annotations.find((annotation) => annotation.id === selectedAnnotationId);
     if (!selected) return;
     if (event.key === "Delete" || event.key === "Backspace") {
@@ -426,7 +533,7 @@ function AnnotationCanvas({
       onPointerDown={handlePointerDown}
       onPointerMove={handlePointerMove}
       onPointerUp={handlePointerUp}
-      onPointerCancel={() => { setDragStart(null); setMoving(null); }}
+      onPointerCancel={() => { setDraftAnnotation(null); setMoving(null); }}
       onKeyDown={handleKeyDown}
     />
   );
@@ -589,6 +696,9 @@ export function App() {
   const [annotationsByMarker, setAnnotationsByMarker] = useState(initialAnnotations);
   const [selectedAnnotationId, setSelectedAnnotationId] = useState(null);
   const [activeTool, setActiveTool] = useState("arrow");
+  const [pencilWidth, setPencilWidth] = useState(4);
+  const [timelineScrubbing, setTimelineScrubbing] = useState(false);
+  const [isMuted, setIsMuted] = useState(false);
   const [currentTime, setCurrentTime] = useState(INITIAL_TIME);
   const [isPlaying, setIsPlaying] = useState(false);
   const [activeEditorTab, setActiveEditorTab] = useState("script");
@@ -598,6 +708,10 @@ export function App() {
   const [scene, setScene] = useState(12);
   const [leftPanel, setLeftPanel] = useState(57);
   const [projectRailCollapsed, setProjectRailCollapsed] = useState(false);
+  const [archivesOpen, setArchivesOpen] = useState(false);
+  const [projectMenu, setProjectMenu] = useState(null);
+  const [renamingProjectId, setRenamingProjectId] = useState(null);
+  const [projectNameDraft, setProjectNameDraft] = useState("");
   const [resizing, setResizing] = useState(false);
   const [layoutMenuOpen, setLayoutMenuOpen] = useState(false);
   const [metadataOpen, setMetadataOpen] = useState(false);
@@ -637,6 +751,8 @@ export function App() {
   const fileInputRef = useRef(null);
   const projectInputRef = useRef(null);
   const videoRef = useRef(null);
+  const timelineTrackRef = useRef(null);
+  const timelineScrubRef = useRef({ pointerId: null, frame: null, pending: null });
   const persistenceTimerRef = useRef(null);
   const hydrationStartedRef = useRef(false);
   const composerTitleRef = useRef(null);
@@ -644,8 +760,19 @@ export function App() {
   const tmdbInitialFocusRef = useRef(null);
   const exportInitialFocusRef = useRef(null);
   const markerMenuButtonRef = useRef(null);
+  const projectMenuRef = useRef(null);
+  const projectMenuButtonRef = useRef(null);
+  const projectRenameInputRef = useRef(null);
 
-  const activeProject = projectList[selectedProject] || projectList[0];
+  const activeProject = selectedProject >= 0 ? projectList[selectedProject] || null : null;
+  const activeProjectEntries = useMemo(() => projectList
+    .map((project, index) => ({ project, index }))
+    .filter(({ project }) => !project.archived), [projectList]);
+  const archivedProjectEntries = useMemo(() => projectList
+    .map((project, index) => ({ project, index }))
+    .filter(({ project }) => project.archived), [projectList]);
+  const projectMenuTarget = projectList.find((project) => project.id === projectMenu?.projectId) || null;
+  const renamingProject = projectList.find((project) => project.id === renamingProjectId) || null;
   const selectedMarker = markers.find((marker) => marker.id === selectedMarkerId) || markers[0] || {
     id: null,
     time: currentTime,
@@ -724,25 +851,28 @@ export function App() {
       ...project,
       mediaMissing: Boolean(project.path && !project.mediaURL),
     }));
-    const nextIndex = Math.max(0, nextProjects.findIndex((project) => project.id === migrated.activeProjectId));
-    const nextProject = nextProjects[nextIndex];
+    const nextIndex = migrated.activeProjectId == null
+      ? -1
+      : nextProjects.findIndex((project) => project.id === migrated.activeProjectId && !project.archived);
+    const nextProject = nextIndex >= 0 ? nextProjects[nextIndex] : null;
     setProjectList(nextProjects);
     setDocuments(migrated.documents);
     setSelectedProject(nextIndex);
-    applyDocument(migrated.documents[nextProject.id] || emptyDocument());
-    setMediaSource(nextProject.mediaURL || "");
-    setMediaPath(nextProject.path || "");
-    setFileMetadata(nextProject.metadata || null);
-    setDuration(metadataDuration(nextProject.metadata, nextProject.path ? 1 : DURATION));
-    setFrameRate(metadataFrameRate(nextProject.metadata, FPS));
+    applyDocument(nextProject ? migrated.documents[nextProject.id] || emptyDocument() : emptyDocument());
+    setMediaSource(nextProject?.mediaURL || "");
+    setMediaPath(nextProject?.path || "");
+    setFileMetadata(nextProject?.metadata || null);
+    setDuration(metadataDuration(nextProject?.metadata, nextProject?.path ? 1 : DURATION));
+    setFrameRate(metadataFrameRate(nextProject?.metadata, FPS));
     setLeftPanel(migrated.preferences.leftPanel);
     setFormat(migrated.preferences.format);
     setProjectRailCollapsed(migrated.preferences.projectRailCollapsed);
+    setIsMuted(migrated.preferences.muted);
     setSearch("");
     setMarkerFilters(emptyFilters());
     if (rawState?._recoveredFromSnapshot) {
       setToast("La sauvegarde principale était corrompue. Le dernier snapshot valide a été restauré.");
-    } else if (nextProject.mediaMissing) {
+    } else if (nextProject?.mediaMissing) {
       setToast("Le média de ce projet a été déplacé. Vous pouvez le relier sans perdre l’analyse.");
     }
     return migrated;
@@ -753,6 +883,60 @@ export function App() {
     if (videoRef.current) videoRef.current.currentTime = value;
     setCurrentTime(value);
   }, [duration]);
+
+  const toggleMute = useCallback(() => {
+    setIsMuted((muted) => {
+      setToast(muted ? "Son rétabli" : "Son coupé");
+      return !muted;
+    });
+  }, []);
+
+  const seekTimelineAtClientX = useCallback((clientX, immediate = false) => {
+    const rect = timelineTrackRef.current?.getBoundingClientRect();
+    if (!rect) return;
+    const target = timelinePointerTarget(clientX, rect.left, rect.width, timelineDuration);
+    const scrub = timelineScrubRef.current;
+    scrub.pending = target;
+    if (immediate) {
+      if (scrub.frame != null) window.cancelAnimationFrame(scrub.frame);
+      scrub.frame = null;
+      scrub.pending = null;
+      seekTo(target);
+      return;
+    }
+    if (scrub.frame != null) return;
+    scrub.frame = window.requestAnimationFrame(() => {
+      scrub.frame = null;
+      const pending = scrub.pending;
+      scrub.pending = null;
+      if (pending != null) seekTo(pending);
+    });
+  }, [seekTo, timelineDuration]);
+
+  const startTimelineScrub = useCallback((event) => {
+    if (event.button !== 0 || event.target.closest?.("button")) return;
+    videoRef.current?.pause();
+    setIsPlaying(false);
+    timelineScrubRef.current.pointerId = event.pointerId;
+    event.currentTarget.setPointerCapture(event.pointerId);
+    setTimelineScrubbing(true);
+    seekTimelineAtClientX(event.clientX, true);
+  }, [seekTimelineAtClientX]);
+
+  const moveTimelineScrub = useCallback((event) => {
+    if (timelineScrubRef.current.pointerId !== event.pointerId) return;
+    seekTimelineAtClientX(event.clientX);
+  }, [seekTimelineAtClientX]);
+
+  const finishTimelineScrub = useCallback((event) => {
+    if (timelineScrubRef.current.pointerId !== event.pointerId) return;
+    seekTimelineAtClientX(event.clientX, true);
+    if (event.currentTarget.hasPointerCapture(event.pointerId)) {
+      event.currentTarget.releasePointerCapture(event.pointerId);
+    }
+    timelineScrubRef.current.pointerId = null;
+    setTimelineScrubbing(false);
+  }, [seekTimelineAtClientX]);
 
   const applyVideoResult = useCallback((result) => {
     if (!result || result.cancelled) return;
@@ -771,6 +955,7 @@ export function App() {
       path: result.path,
       mediaURL: result.mediaURL,
       mediaMissing: false,
+      archived: false,
       metadata: result.metadata || null,
       metadataError: result.metadataError || "",
     };
@@ -874,6 +1059,24 @@ export function App() {
     }
   }, [applyPersistedEnvelope]);
 
+  const applyProjectResult = useCallback((result) => {
+    if (!result || result.cancelled) return;
+    if (result.error) {
+      setToast(`Import impossible : ${result.error}`);
+      return;
+    }
+    try {
+      applyPersistedEnvelope(result.state);
+      setToast(result.recovered
+        ? "Projet importé et migré depuis un ancien format"
+        : result.portable
+          ? "Projet portable importé avec sa vidéo"
+          : "Projet Cinécrique importé");
+    } catch (error) {
+      setToast(`Import impossible : ${error.message}`);
+    }
+  }, [applyPersistedEnvelope]);
+
   const importProject = useCallback(async () => {
     if (!nativeMode) {
       projectInputRef.current?.click();
@@ -881,13 +1084,11 @@ export function App() {
     }
     try {
       const result = await nativeBridge.call("importProject");
-      if (!result || result.cancelled) return;
-      applyPersistedEnvelope(result.state);
-      setToast(result.recovered ? "Projet importé et migré depuis un ancien format" : "Projet Cinécrique importé");
+      applyProjectResult(result);
     } catch (error) {
       setToast(`Import impossible : ${error.message}`);
     }
-  }, [applyPersistedEnvelope, nativeMode]);
+  }, [applyProjectResult, nativeMode]);
 
   const openExternal = async (url) => {
     const safeURL = safeExternalURL(url);
@@ -994,29 +1195,122 @@ export function App() {
     }
   };
 
+  const applyProjectCollection = useCallback((nextProjects, nextDocuments, nextActiveId) => {
+    const nextIndex = nextActiveId == null
+      ? -1
+      : nextProjects.findIndex((project) => project.id === nextActiveId && !project.archived);
+    const nextProject = nextIndex >= 0 ? nextProjects[nextIndex] : null;
+    setProjectList(nextProjects);
+    setDocuments(nextDocuments);
+    setSelectedProject(nextIndex);
+    applyDocument(nextProject
+      ? nextDocuments[nextProject.id] || (nextProject.id === "demo-le-mepris" ? initialDocument() : emptyDocument())
+      : emptyDocument());
+    setMediaSource(nextProject?.mediaURL || "");
+    setMediaPath(nextProject?.path || "");
+    setFileMetadata(nextProject?.metadata || null);
+    setDuration(metadataDuration(nextProject?.metadata, nextProject?.path ? 1 : DURATION));
+    setFrameRate(metadataFrameRate(nextProject?.metadata, FPS));
+  }, [applyDocument]);
+
+  const documentsIncludingActive = useCallback(() => (activeProject?.id
+    ? { ...documents, [activeProject.id]: currentDocument }
+    : documents), [activeProject?.id, currentDocument, documents]);
+
   const selectProjectAt = useCallback((index) => {
     const nextProject = projectList[index];
-    if (!nextProject || nextProject.id === activeProject?.id) return;
-    if (activeProject?.id) {
-      setDocuments((current) => ({ ...current, [activeProject.id]: currentDocument }));
-    }
-    applyDocument(documents[nextProject.id] || (nextProject.id === "demo-le-mepris" ? initialDocument() : emptyDocument()));
-    setSelectedProject(index);
-    setMediaSource(nextProject.mediaURL || "");
-    setMediaPath(nextProject.path || "");
-    setFileMetadata(nextProject.metadata || null);
-    setDuration(metadataDuration(nextProject.metadata, nextProject.path ? 1 : DURATION));
-    setFrameRate(metadataFrameRate(nextProject.metadata, FPS));
+    if (!nextProject || nextProject.archived || nextProject.id === activeProject?.id) return;
+    applyProjectCollection(projectList, documentsIncludingActive(), nextProject.id);
+    setProjectMenu(null);
     setToast(nextProject.mediaMissing ? "Média introuvable : reliez le fichier pour reprendre la lecture." : `${nextProject.title} ouvert`);
-  }, [activeProject?.id, applyDocument, currentDocument, documents, projectList]);
+  }, [activeProject?.id, applyProjectCollection, documentsIncludingActive, projectList]);
+
+  const openProjectMenu = useCallback((projectId, event, trigger = null) => {
+    event.preventDefault();
+    event.stopPropagation();
+    const rect = trigger?.getBoundingClientRect();
+    const rawX = rect ? rect.right + 6 : event.clientX;
+    const rawY = rect ? rect.top : event.clientY;
+    projectMenuButtonRef.current = trigger;
+    setProjectMenu((current) => current?.projectId === projectId
+      ? null
+      : {
+        projectId,
+        x: clamp(rawX, 8, window.innerWidth - 210),
+        y: clamp(rawY, 62, window.innerHeight - 280),
+        moveOpen: false,
+      });
+  }, []);
+
+  const beginProjectRename = () => {
+    if (!projectMenuTarget) return;
+    setRenamingProjectId(projectMenuTarget.id);
+    setProjectNameDraft(projectMenuTarget.title || "");
+    setProjectMenu(null);
+  };
+
+  const saveProjectRename = (event) => {
+    event.preventDefault();
+    const title = projectNameDraft.trim();
+    if (!title) return;
+    setProjectList((current) => renameProject(current, renamingProjectId, title));
+    setRenamingProjectId(null);
+    setToast("Projet renommé");
+  };
+
+  const moveProjectInList = (direction) => {
+    if (!projectMenuTarget) return;
+    const activeIdentifier = activeProject?.id || null;
+    const nextProjects = moveProject(projectList, projectMenuTarget.id, direction);
+    setProjectList(nextProjects);
+    setSelectedProject(activeIdentifier == null ? -1 : nextProjects.findIndex((project) => project.id === activeIdentifier));
+    setProjectMenu(null);
+    setToast(direction < 0 ? "Projet déplacé vers le haut" : "Projet déplacé vers le bas");
+  };
+
+  const toggleProjectArchive = () => {
+    if (!projectMenuTarget) return;
+    const willArchive = !projectMenuTarget.archived;
+    const nextProjects = setProjectArchived(projectList, projectMenuTarget.id, willArchive);
+    const nextDocuments = documentsIncludingActive();
+    const nextActiveId = willArchive && activeProject?.id === projectMenuTarget.id
+      ? nextProjects.find((project) => !project.archived)?.id ?? null
+      : activeProject?.id ?? (willArchive ? null : projectMenuTarget.id);
+    applyProjectCollection(nextProjects, nextDocuments, nextActiveId);
+    setProjectMenu(null);
+    if (willArchive) setArchivesOpen(true);
+    setToast(willArchive ? "Projet archivé" : "Projet restauré");
+  };
+
+  const requestProjectDeletion = () => {
+    if (!projectMenuTarget) return;
+    const project = projectMenuTarget;
+    setProjectMenu(null);
+    setConfirmation({
+      title: "Supprimer le projet ?",
+      message: `« ${project.title} » et toute son analyse locale seront supprimés. Le fichier vidéo original restera intact.`,
+      confirmLabel: "Supprimer le projet",
+      returnFocusRef: projectMenuButtonRef,
+      action: () => {
+        const result = removeProject(
+          projectList,
+          documentsIncludingActive(),
+          project.id,
+          activeProject?.id || null,
+        );
+        applyProjectCollection(result.projects, result.documents, result.activeProjectId);
+        setToast("Projet supprimé, vidéo originale conservée");
+      },
+    });
+  };
 
   const persistedState = useMemo(() => ({
-    version: 4,
+    version: 5,
     projects: projectList,
     activeProjectId: activeProject?.id || null,
     documents: activeProject?.id ? { ...documents, [activeProject.id]: currentDocument } : documents,
-    preferences: { leftPanel, format, projectRailCollapsed },
-  }), [activeProject?.id, currentDocument, documents, format, leftPanel, projectList, projectRailCollapsed]);
+    preferences: { leftPanel, format, projectRailCollapsed, muted: isMuted },
+  }), [activeProject?.id, currentDocument, documents, format, isMuted, leftPanel, projectList, projectRailCollapsed]);
 
   const saveNow = useCallback(async () => {
     if (!hydrated) return;
@@ -1035,7 +1329,7 @@ export function App() {
 
     nativeBridge.call("loadState")
       .then((state) => {
-        if (cancelled || !state?.projects?.length) return;
+        if (cancelled || !Array.isArray(state?.projects)) return;
         applyPersistedEnvelope(state);
       })
       .catch((error) => !cancelled && setToast(error.message))
@@ -1056,6 +1350,7 @@ export function App() {
     const disposers = [
       nativeBridge.on("analyse:file-dropped", applyVideoResult),
       nativeBridge.on("analyse:subtitle-dropped", applySubtitleResult),
+      nativeBridge.on("analyse:project-dropped", applyProjectResult),
       nativeBridge.on("analyse:file-rejected", (detail) => setToast(detail?.message || "Fichier non pris en charge")),
       nativeBridge.on("analyse:open-video-requested", importVideo),
       nativeBridge.on("analyse:open-subtitle-requested", importSubtitle),
@@ -1065,12 +1360,51 @@ export function App() {
       }),
       nativeBridge.on("analyse:export-requested", () => setExportOpen(true)),
     ];
+    nativeBridge.readyForEvents().catch((error) => setToast(error.message));
     return () => disposers.forEach((dispose) => dispose());
-  }, [applySubtitleResult, applyVideoResult, importSubtitle, importVideo, nativeMode, saveNow]);
+  }, [applyProjectResult, applySubtitleResult, applyVideoResult, importSubtitle, importVideo, nativeMode, saveNow]);
 
   useEffect(() => () => {
     if (mediaSource.startsWith("blob:")) URL.revokeObjectURL(mediaSource);
   }, [mediaSource]);
+
+  useEffect(() => () => {
+    const frame = timelineScrubRef.current.frame;
+    if (frame != null) window.cancelAnimationFrame(frame);
+  }, []);
+
+  useEffect(() => {
+    const handleMuteShortcut = (event) => {
+      if (!isMuteShortcut(event)) return;
+      event.preventDefault();
+      toggleMute();
+    };
+    window.addEventListener("keydown", handleMuteShortcut);
+    return () => window.removeEventListener("keydown", handleMuteShortcut);
+  }, [toggleMute]);
+
+  useEffect(() => {
+    if (!projectMenu) return undefined;
+    window.requestAnimationFrame(() => projectMenuRef.current?.querySelector("button")?.focus());
+    const closeMenu = (event) => {
+      if (projectMenuRef.current?.contains(event.target) || projectMenuButtonRef.current?.contains(event.target)) return;
+      setProjectMenu(null);
+    };
+    const handleKeyDown = (event) => {
+      if (event.key !== "Escape") return;
+      event.preventDefault();
+      setProjectMenu(null);
+      projectMenuButtonRef.current?.focus();
+    };
+    window.addEventListener("pointerdown", closeMenu);
+    window.addEventListener("keydown", handleKeyDown);
+    window.addEventListener("resize", closeMenu);
+    return () => {
+      window.removeEventListener("pointerdown", closeMenu);
+      window.removeEventListener("keydown", handleKeyDown);
+      window.removeEventListener("resize", closeMenu);
+    };
+  }, [projectMenu?.projectId]);
 
   useEffect(() => {
     if (!isPlaying || mediaSource) return undefined;
@@ -1349,7 +1683,12 @@ export function App() {
       setToast("Sélectionnez au moins un élément à exporter.");
       return;
     }
-    const needsMedia = exportOptions.video || exportOptions.currentFrame || exportOptions.allFrames;
+    const projectPreviewAvailable = exportOptions.project && Boolean(mediaPath) && !activeProject?.mediaMissing;
+    const needsMedia = exportOptions.video
+      || exportOptions.currentFrame
+      || exportOptions.allFrames
+      || (exportOptions.project && exportOptions.portableProject)
+      || (projectPreviewAvailable && annotatedFrames.length > 0);
     if (needsMedia && (!mediaPath || activeProject?.mediaMissing)) {
       setToast("Reliez d’abord le média original pour exporter la vidéo ou des images.");
       return;
@@ -1375,11 +1714,13 @@ export function App() {
       : exportOptions.currentFrame
         ? [{ marker: selectedMarker.id == null ? { id: "current", time: currentTime } : selectedMarker, annotations }]
         : [];
-    const frames = frameEntries.map(({ marker, annotations: frameAnnotations }, index) => ({
-      name: `${safeExportBaseName(activeProject?.title)}-image-${String(index + 1).padStart(2, "0")}-${secondsToTimecode(marker.time, frameRate).replaceAll(":", "-")}.png`,
+    const makeFramePayload = (entries, prefix = "image") => entries.map(({ marker, annotations: frameAnnotations }, index) => ({
+      name: `${safeExportBaseName(activeProject?.title)}-${prefix}-${String(index + 1).padStart(2, "0")}-${secondsToTimecode(marker.time, frameRate).replaceAll(":", "-")}.png`,
       time: marker.time,
       annotations: frameAnnotations,
     }));
+    const frames = makeFramePayload(frameEntries);
+    const projectFrames = projectPreviewAvailable ? makeFramePayload(annotatedFrames, "apercu") : [];
 
     setExporting(true);
     try {
@@ -1390,10 +1731,15 @@ export function App() {
           includeVideo: exportOptions.video,
           mediaPath,
           frames,
+          projectPackage: exportOptions.project ? {
+            state: persistedState,
+            includeVideo: Boolean(exportOptions.portableProject),
+            frames: projectFrames,
+          } : null,
         });
         if (result?.cancelled) return;
       } else {
-        if (needsMedia) throw new Error("L’export vidéo et image nécessite l’application macOS.");
+        if (needsMedia || exportOptions.project) throw new Error("Cet export nécessite l’application macOS.");
         files.forEach((file) => {
           const url = URL.createObjectURL(new Blob([file.content], { type: "text/plain;charset=utf-8" }));
           const anchor = document.createElement("a");
@@ -1435,6 +1781,41 @@ export function App() {
     setLayoutMenuOpen(false);
     setToast(`Disposition « ${label} » appliquée`);
   };
+
+  const projectMenuCohort = projectMenuTarget
+    ? projectList.filter((project) => Boolean(project.archived) === Boolean(projectMenuTarget.archived))
+    : [];
+  const projectMenuPosition = projectMenuTarget
+    ? projectMenuCohort.findIndex((project) => project.id === projectMenuTarget.id)
+    : -1;
+
+  const renderProjectEntry = ({ project, index }, archived = false) => (
+    <div
+      key={project.id}
+      className={`project-item-shell ${archived ? "archived" : ""}`}
+      onContextMenu={(event) => openProjectMenu(project.id, event, event.currentTarget.querySelector(".project-item"))}
+    >
+      <button
+        className={`project-item ${selectedProject === index ? "selected" : ""}`}
+        onClick={archived
+          ? (event) => openProjectMenu(project.id, event, event.currentTarget)
+          : () => selectProjectAt(index)}
+        title={archived ? `${project.title} · archivé` : project.title}
+      >
+        <img src={project.poster} alt="" />
+        <span>{project.title}</span>
+      </button>
+      <button
+        type="button"
+        className="project-more-button"
+        aria-label={`Actions pour ${project.title}`}
+        aria-haspopup="menu"
+        aria-expanded={projectMenu?.projectId === project.id}
+        onClick={(event) => openProjectMenu(project.id, event, event.currentTarget)}
+      ><DotsThree size={16} weight="bold" /></button>
+      {archived && <Archive className="project-archive-badge" size={15} aria-hidden="true" />}
+    </div>
+  );
 
   return (
     <main
@@ -1487,6 +1868,38 @@ export function App() {
         </div>
       </header>
 
+      {projectMenu && projectMenuTarget && (
+        <div
+          ref={projectMenuRef}
+          className="project-context-menu"
+          role="menu"
+          aria-label={`Actions pour ${projectMenuTarget.title}`}
+          style={{ left: projectMenu.x, top: projectMenu.y }}
+        >
+          <div className="project-menu-title">{projectMenuTarget.title}</div>
+          <button type="button" role="menuitem" onClick={beginProjectRename}><PencilSimple size={16} /> Renommer</button>
+          <button
+            type="button"
+            role="menuitem"
+            aria-haspopup="menu"
+            aria-expanded={projectMenu.moveOpen}
+            onClick={() => setProjectMenu((current) => ({ ...current, moveOpen: !current.moveOpen }))}
+          ><ArrowsDownUp size={16} /> Déplacer <CaretRight size={14} /></button>
+          {projectMenu.moveOpen && (
+            <div className="project-move-options" role="group" aria-label="Déplacer le projet">
+              <button type="button" role="menuitem" disabled={projectMenuPosition <= 0} onClick={() => moveProjectInList(-1)}><ArrowUp size={15} /> Vers le haut</button>
+              <button type="button" role="menuitem" disabled={projectMenuPosition < 0 || projectMenuPosition >= projectMenuCohort.length - 1} onClick={() => moveProjectInList(1)}><ArrowDown size={15} /> Vers le bas</button>
+            </div>
+          )}
+          <button type="button" role="menuitem" onClick={toggleProjectArchive}>
+            {projectMenuTarget.archived ? <ArrowCounterClockwise size={16} /> : <Archive size={16} />}
+            {projectMenuTarget.archived ? "Restaurer" : "Archiver"}
+          </button>
+          <span className="project-menu-separator" />
+          <button type="button" role="menuitem" className="danger" onClick={requestProjectDeletion}><Trash size={16} /> Supprimer</button>
+        </div>
+      )}
+
       <div className={`app-body ${projectRailCollapsed ? "rail-collapsed" : ""}`}>
         <aside className={`project-rail ${projectRailCollapsed ? "collapsed" : ""}`}>
           <div className="rail-heading">
@@ -1500,19 +1913,24 @@ export function App() {
               {projectRailCollapsed ? <CaretRight size={15} /> : <CaretLeft size={15} />}
             </AppIconButton>
           </div>
-          <nav aria-label="Analyses récentes">
-            {projectList.map((project, index) => (
-              <button
-                key={project.id}
-                className={`project-item ${selectedProject === index ? "selected" : ""}`}
-                onClick={() => selectProjectAt(index)}
-                title={project.title}
-              >
-                <img src={project.poster} alt="" />
-                <span>{project.title}</span>
-              </button>
-            ))}
-          </nav>
+          <div className="project-scroll">
+            <nav className="project-list" aria-label="Analyses récentes">
+              {activeProjectEntries.map((entry) => renderProjectEntry(entry))}
+              {!activeProjectEntries.length && !projectRailCollapsed && <p className="project-empty">Aucun projet actif</p>}
+            </nav>
+            {archivedProjectEntries.length > 0 && (
+              <section className="archive-section" aria-label="Projets archivés">
+                <button type="button" className="archive-heading" aria-expanded={archivesOpen} onClick={() => setArchivesOpen((open) => !open)}>
+                  <Archive size={14} /> Archives <span>{archivedProjectEntries.length}</span><CaretDown size={13} className={archivesOpen ? "open" : ""} />
+                </button>
+                {archivesOpen && (
+                  <nav className="project-list archived-list" aria-label="Archives">
+                    {archivedProjectEntries.map((entry) => renderProjectEntry(entry, true))}
+                  </nav>
+                )}
+              </section>
+            )}
+          </div>
           <button className="import-button" onClick={importVideo} title="Importer un film">
             <Plus size={30} weight="light" />
             <span>Importer</span>
@@ -1541,6 +1959,7 @@ export function App() {
                   ref={videoRef}
                   className="film-frame"
                   src={mediaSource}
+                  muted={isMuted}
                   preload="metadata"
                   playsInline
                   onLoadedMetadata={(event) => {
@@ -1560,6 +1979,7 @@ export function App() {
               <AnnotationCanvas
                 annotations={annotations}
                 activeTool={activeTool}
+                pencilWidth={pencilWidth}
                 selectedAnnotationId={selectedAnnotationId}
                 onAdd={addAnnotation}
                 onOpenNote={(point) => openComposer("frame", point)}
@@ -1592,6 +2012,9 @@ export function App() {
                   <AppIconButton label="Plan suivant" onClick={() => stepBy(10)}><SkipForward size={17} weight="fill" /></AppIconButton>
                 </div>
                 <div className="transport-meta">
+                  <AppIconButton label={isMuted ? "Rétablir le son (M)" : "Couper le son (M)"} active={isMuted} aria-pressed={isMuted} onClick={toggleMute}>
+                    {isMuted ? <SpeakerSlash size={19} /> : <SpeakerHigh size={19} />}
+                  </AppIconButton>
                   <AppIconButton label="Importer des sous-titres" onClick={importSubtitle}><Subtitles size={19} /></AppIconButton>
                   <AppIconButton label="Plein écran" onClick={() => viewerRef.current?.requestFullscreen?.()}><CornersOut size={19} /></AppIconButton>
                 </div>
@@ -1602,6 +2025,21 @@ export function App() {
                 <button className={activeTool === "arrow" ? "active" : ""} onClick={() => setActiveTool("arrow")} title="Tracer une flèche"><ArrowUpRight size={17} /> <span>Flèche</span></button>
                 <button className={activeTool === "rect" ? "active" : ""} onClick={() => setActiveTool("rect")} title="Encadrer une zone"><Rectangle size={17} /> <span>Rectangle</span></button>
                 <button className={activeTool === "point" ? "active" : ""} onClick={() => setActiveTool("point")} title="Placer un point"><Circle size={15} /> <span>Point</span></button>
+                <button className={activeTool === "pencil" ? "active" : ""} onClick={() => setActiveTool("pencil")} title="Dessiner à main levée"><PencilSimple size={17} /> <span>Crayon</span></button>
+                {activeTool === "pencil" && (
+                  <div className="pencil-width-control" role="group" aria-label="Épaisseur du crayon">
+                    {[2, 4, 7].map((width) => (
+                      <button
+                        key={width}
+                        type="button"
+                        className={pencilWidth === width ? "active" : ""}
+                        aria-label={`Crayon ${width === 2 ? "fin" : width === 4 ? "moyen" : "épais"}`}
+                        aria-pressed={pencilWidth === width}
+                        onClick={() => setPencilWidth(width)}
+                      ><span style={{ width, height: width }} /></button>
+                    ))}
+                  </div>
+                )}
                 <span className="toolbar-separator" />
                 <AppIconButton label="Annuler la dernière annotation" onClick={undoAnnotation} disabled={!annotations.length}><ArrowUUpLeft size={17} /></AppIconButton>
                 <AppIconButton label="Supprimer l’annotation sélectionnée" onClick={deleteSelectedAnnotation} disabled={!selectedAnnotation}><X size={17} /></AppIconButton>
@@ -1650,7 +2088,8 @@ export function App() {
 
             <div className="timeline-section">
               <div
-                className="timeline-track"
+                ref={timelineTrackRef}
+                className={`timeline-track ${timelineScrubbing ? "scrubbing" : ""}`}
                 role="slider"
                 aria-label="Position dans le film"
                 aria-valuemin="0"
@@ -1664,10 +2103,18 @@ export function App() {
                   event.preventDefault();
                   seekTo(target);
                 }}
-                onClick={(event) => {
-                  if (event.target.closest("button")) return;
-                  const rect = event.currentTarget.getBoundingClientRect();
-                  seekTo(clamp(((event.clientX - rect.left) / rect.width) * timelineDuration, 0, timelineDuration));
+                onPointerDown={startTimelineScrub}
+                onPointerMove={moveTimelineScrub}
+                onPointerUp={finishTimelineScrub}
+                onPointerCancel={(event) => {
+                  if (timelineScrubRef.current.pointerId !== event.pointerId) return;
+                  if (timelineScrubRef.current.frame != null) {
+                    window.cancelAnimationFrame(timelineScrubRef.current.frame);
+                  }
+                  timelineScrubRef.current.frame = null;
+                  timelineScrubRef.current.pending = null;
+                  timelineScrubRef.current.pointerId = null;
+                  setTimelineScrubbing(false);
                 }}
               >
                 <div className="timeline-ruler" />
@@ -1906,7 +2353,14 @@ export function App() {
           <fieldset>
             <legend>Données</legend>
             <label><Info size={18} /><span><strong>Métadonnées</strong><small>Fichier média et fiche TMDB</small></span><input type="checkbox" checked={exportOptions.metadata} onChange={(event) => setExportOptions((current) => ({ ...current, metadata: event.target.checked }))} /></label>
-            <label><Package size={18} /><span><strong>Projet complet</strong><small>Réimportable dans Cinécrique</small></span><input type="checkbox" checked={exportOptions.project} onChange={(event) => setExportOptions((current) => ({ ...current, project: event.target.checked }))} /></label>
+            <label><Package size={18} /><span><strong>Projet Cinécrique</strong><small>Format .cinecrique réimportable</small></span><input type="checkbox" checked={exportOptions.project} onChange={(event) => setExportOptions((current) => ({ ...current, project: event.target.checked, portableProject: event.target.checked ? current.portableProject : false }))} /></label>
+            {exportOptions.project && (
+              <label className={`export-suboption ${!mediaPath || activeProject?.mediaMissing ? "disabled" : ""}`}>
+                <FilmStrip size={17} />
+                <span><strong>Inclure la vidéo</strong><small>Projet portable, fichier plus volumineux</small></span>
+                <input type="checkbox" disabled={!mediaPath || activeProject?.mediaMissing} checked={exportOptions.portableProject} onChange={(event) => setExportOptions((current) => ({ ...current, portableProject: event.target.checked }))} />
+              </label>
+            )}
           </fieldset>
         </div>
         <div className="export-footer">
@@ -1916,12 +2370,42 @@ export function App() {
       </ModalDialog>
 
       <ModalDialog
+        open={Boolean(renamingProject)}
+        onClose={() => setRenamingProjectId(null)}
+        labelledBy="project-rename-title"
+        className="note-composer project-rename-dialog"
+        as="form"
+        initialFocusRef={projectRenameInputRef}
+        returnFocusRef={projectMenuButtonRef}
+        onSubmit={saveProjectRename}
+      >
+        <div className="composer-heading">
+          <div><span>Projet local</span><h2 id="project-rename-title">Renommer le projet</h2></div>
+          <AppIconButton label="Fermer" type="button" onClick={() => setRenamingProjectId(null)}><X size={19} /></AppIconButton>
+        </div>
+        <label>
+          <span>Nom du projet</span>
+          <input
+            ref={projectRenameInputRef}
+            value={projectNameDraft}
+            maxLength={500}
+            onChange={(event) => setProjectNameDraft(event.target.value)}
+            autoComplete="off"
+          />
+        </label>
+        <div className="composer-actions">
+          <button type="button" onClick={() => setRenamingProjectId(null)}>Annuler</button>
+          <button className="primary" type="submit" disabled={!projectNameDraft.trim()}>Renommer</button>
+        </div>
+      </ModalDialog>
+
+      <ModalDialog
         open={Boolean(confirmation)}
         onClose={() => setConfirmation(null)}
         labelledBy="confirmation-title"
         className="confirmation-dialog"
         initialFocusRef={confirmationCancelRef}
-        returnFocusRef={markerMenuButtonRef}
+        returnFocusRef={confirmation?.returnFocusRef || markerMenuButtonRef}
       >
         <div className="composer-heading">
           <div><span>Confirmation</span><h2 id="confirmation-title">{confirmation?.title}</h2></div>

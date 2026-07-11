@@ -26,3 +26,9 @@ test("counts current or all annotated frames without double counting", () => {
   assert.equal(exportSelectionCount({ script: true, video: true, currentFrame: true, allFrames: false }), 3);
   assert.equal(exportSelectionCount({ currentFrame: true, allFrames: true }, 4), 4);
 });
+
+test("counts a project package without exposing it as a plain text export", () => {
+  const options = { project: true, portableProject: true };
+  assert.equal(exportSelectionCount(options), 1);
+  assert.deepEqual(buildTextExportFiles(options, { title: "Film" }), []);
+});

@@ -1,6 +1,7 @@
 import AppKit
 import AVFoundation
 import Foundation
+import AnalyseCore
 
 enum ExportService {
     struct TextFile {
@@ -12,6 +13,12 @@ enum ExportService {
         let name: String
         let time: Double
         let annotations: [[String: Any]]
+    }
+
+    struct ProjectPackage {
+        let state: [String: Any]
+        let includeVideo: Bool
+        let frames: [Frame]
     }
 
     static func writeSingleText(_ file: TextFile, to destination: URL) throws {
@@ -60,6 +67,7 @@ enum ExportService {
         mediaURL: URL?,
         includeVideo: Bool,
         frames: [Frame],
+        projectPackage: ProjectPackage?,
         to destination: URL
     ) throws {
         let manager = FileManager.default
@@ -78,11 +86,75 @@ enum ExportService {
             guard let mediaURL else { throw ExportError.missingMedia }
             try writeFrame(frame, mediaURL: mediaURL, to: packageDirectory.appendingPathComponent(frame.name))
         }
+        if let projectPackage {
+            try writeProjectPackage(
+                projectPackage,
+                named: baseName,
+                mediaURL: mediaURL,
+                to: packageDirectory.appendingPathComponent("\(baseName).cinecrique")
+            )
+        }
+
+        try archiveDirectory(packageDirectory, keepingParent: true, to: destination)
+    }
+
+    static func writeProjectPackage(
+        _ package: ProjectPackage,
+        named baseName: String,
+        mediaURL: URL?,
+        to destination: URL
+    ) throws {
+        guard JSONSerialization.isValidJSONObject(package.state) else { throw ExportError.invalidProject }
+        let projectData = try JSONSerialization.data(withJSONObject: package.state, options: [.prettyPrinted, .sortedKeys])
+        guard projectData.count <= AppStateStore.maxStateBytes else { throw ExportError.projectTooLarge }
+
+        let manager = FileManager.default
+        let temporaryRoot = manager.temporaryDirectory.appendingPathComponent("Cinecrique-Project-\(UUID().uuidString)", isDirectory: true)
+        let contentDirectory = temporaryRoot.appendingPathComponent(baseName, isDirectory: true)
+        try manager.createDirectory(at: contentDirectory, withIntermediateDirectories: true, attributes: [.posixPermissions: 0o700])
+        defer { try? manager.removeItem(at: temporaryRoot) }
+
+        var manifest: [String: Any] = [
+            "format": "app.cinecrique.project",
+            "formatVersion": 1,
+            "stateVersion": (package.state["version"] as? NSNumber)?.intValue ?? 1,
+            "createdAt": ISO8601DateFormatter().string(from: Date()),
+            "previewCount": package.frames.count,
+            "portable": package.includeVideo,
+        ]
+        if package.includeVideo {
+            guard let mediaURL else { throw ExportError.missingMedia }
+            let mediaDirectory = contentDirectory.appendingPathComponent("Media", isDirectory: true)
+            try manager.createDirectory(at: mediaDirectory, withIntermediateDirectories: false, attributes: [.posixPermissions: 0o700])
+            let mediaName = ProjectArchivePolicy.portableMediaFileName(for: mediaURL.lastPathComponent)
+            try copyVideo(from: mediaURL, to: mediaDirectory.appendingPathComponent(mediaName))
+            manifest["embeddedMedia"] = "Media/\(mediaName)"
+        }
+
+        if !package.frames.isEmpty {
+            guard let mediaURL else { throw ExportError.missingMedia }
+            let previewsDirectory = contentDirectory.appendingPathComponent("Previews", isDirectory: true)
+            try manager.createDirectory(at: previewsDirectory, withIntermediateDirectories: false, attributes: [.posixPermissions: 0o700])
+            for frame in package.frames {
+                try writeFrame(frame, mediaURL: mediaURL, to: previewsDirectory.appendingPathComponent(frame.name))
+            }
+        }
+
+        let manifestData = try JSONSerialization.data(withJSONObject: manifest, options: [.prettyPrinted, .sortedKeys])
+        try manifestData.write(to: contentDirectory.appendingPathComponent("manifest.json"), options: .atomic)
+        try projectData.write(to: contentDirectory.appendingPathComponent("project.json"), options: .atomic)
+        try archiveDirectory(contentDirectory, keepingParent: false, to: destination)
+    }
+
+    private static func archiveDirectory(_ directory: URL, keepingParent: Bool, to destination: URL) throws {
+        let manager = FileManager.default
 
         if manager.fileExists(atPath: destination.path) { try manager.removeItem(at: destination) }
         let process = Process()
         process.executableURL = URL(fileURLWithPath: "/usr/bin/ditto")
-        process.arguments = ["-c", "-k", "--norsrc", "--keepParent", packageDirectory.path, destination.path]
+        process.arguments = ["-c", "-k", "--norsrc"]
+            + (keepingParent ? ["--keepParent"] : [])
+            + [directory.path, destination.path]
         try process.run()
         process.waitUntilExit()
         guard process.terminationStatus == 0 else { throw ExportError.archiveFailed }
@@ -136,6 +208,19 @@ enum ExportService {
                 ]
                 let labelSize = label.size(withAttributes: attributes)
                 label.draw(at: CGPoint(x: center.x - labelSize.width / 2, y: center.y - labelSize.height / 2), withAttributes: attributes)
+            case "pencil":
+                let points = (annotation["points"] as? [[String: Any]] ?? []).prefix(1_000)
+                guard let first = points.first else { continue }
+                context.setStrokeColor(gold)
+                context.setLineDash(phase: 0, lengths: [])
+                let width = max(1, (annotation["width"] as? NSNumber)?.doubleValue ?? 4)
+                context.setLineWidth(max(1, CGFloat(width) * size.width / 640))
+                context.beginPath()
+                context.move(to: CGPoint(x: x(first["x"]), y: y(first["y"])))
+                for point in points.dropFirst() {
+                    context.addLine(to: CGPoint(x: x(point["x"]), y: y(point["y"])))
+                }
+                context.strokePath()
             default:
                 continue
             }
@@ -147,6 +232,8 @@ enum ExportService {
         case missingMedia
         case frameRenderingFailed
         case archiveFailed
+        case invalidProject
+        case projectTooLarge
 
         var errorDescription: String? {
             switch self {
@@ -154,6 +241,8 @@ enum ExportService {
             case .missingMedia: return "Le média original est nécessaire pour exporter les images."
             case .frameRenderingFailed: return "L’image vidéo n’a pas pu être générée."
             case .archiveFailed: return "L’archive ZIP n’a pas pu être créée."
+            case .invalidProject: return "Le projet Cinécrique est invalide."
+            case .projectTooLarge: return "Le projet Cinécrique dépasse la limite de 32 Mo."
             }
         }
     }

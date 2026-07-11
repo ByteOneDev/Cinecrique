@@ -112,3 +112,11 @@ export function timelineKeyboardTarget(key, currentTime, duration, frameRate = 2
   if (!(key in deltas)) return null;
   return Math.min(Math.max(currentTime + deltas[key], 0), Math.max(0, duration));
 }
+
+export function timelinePointerTarget(clientX, left, width, duration) {
+  const safeDuration = Math.max(0, Number(duration) || 0);
+  const safeWidth = Number(width);
+  if (!Number.isFinite(safeWidth) || safeWidth <= 0) return 0;
+  const ratio = (Number(clientX) - Number(left || 0)) / safeWidth;
+  return Math.min(Math.max(ratio, 0), 1) * safeDuration;
+}

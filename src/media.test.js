@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { parseSubtitles, subtitleAt } from "./media.js";
+import { isMuteShortcut, parseSubtitles, subtitleAt } from "./media.js";
 
 test("parses SRT cues with millisecond commas", () => {
   const cues = parseSubtitles(
@@ -33,4 +33,11 @@ test("parses ASS dialogue text and line breaks", () => {
   );
 
   assert.deepEqual(cues, [{ start: 1, end: 3.25, text: "Bonjour\nla mer" }]);
+});
+
+test("uses M for mute except while editing text or using modifiers", () => {
+  assert.equal(isMuteShortcut({ key: "m", target: { tagName: "DIV" } }), true);
+  assert.equal(isMuteShortcut({ key: "M", target: { tagName: "TEXTAREA" } }), false);
+  assert.equal(isMuteShortcut({ key: "m", metaKey: true, target: { tagName: "DIV" } }), false);
+  assert.equal(isMuteShortcut({ key: "x", target: { tagName: "DIV" } }), false);
 });

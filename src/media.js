@@ -116,3 +116,13 @@ export function projectDetail(metadata) {
   const minutes = Math.round((duration % 3600) / 60);
   return hours ? `${hours}h${String(minutes).padStart(2, "0")}` : `${minutes} min`;
 }
+
+export function isMuteShortcut(event) {
+  const tagName = String(event?.target?.tagName || "").toLowerCase();
+  const isEditable = event?.target?.isContentEditable || ["input", "textarea", "select"].includes(tagName);
+  return String(event?.key || "").toLocaleLowerCase("fr") === "m"
+    && !event?.metaKey
+    && !event?.ctrlKey
+    && !event?.altKey
+    && !isEditable;
+}

@@ -108,6 +108,35 @@ do {
         "reject executable external URL"
     )
 
+    let archiveEntries = try ProjectArchivePolicy.validatedEntries([
+        "manifest.json", "project.json", "Previews/frame-01.png", "Media/film.mov"
+    ])
+    try expect(archiveEntries.count == 4, "accept safe project archive entries")
+    do {
+        _ = try ProjectArchivePolicy.validatedEntries(["manifest.json", "../state.json"])
+        throw CheckError.failed("archive traversal should throw")
+    } catch ProjectArchiveError.unsafeEntry {
+        // Expected.
+    }
+    do {
+        _ = try ProjectArchivePolicy.validatedEntries(["Project.json", "project.json"])
+        throw CheckError.failed("case-insensitive archive collision should throw")
+    } catch ProjectArchiveError.duplicateEntry {
+        // Expected.
+    }
+    try expect(
+        ProjectArchivePolicy.expandedByteLimit(compressedBytes: 1_024) == 512 * 1_024 * 1_024,
+        "archive expansion allowance has a bounded minimum"
+    )
+    try expect(
+        ProjectArchivePolicy.portableMediaFileName(for: "Un film à Marseille.MP4") == "media.mp4",
+        "portable media names remain ASCII and preserve the extension"
+    )
+    try expect(
+        ProjectArchivePolicy.portableMediaFileName(for: "film.🎞") == "media",
+        "portable media names reject unsafe extensions"
+    )
+
     let fileManager = FileManager.default
     let storeDirectory = fileManager.temporaryDirectory
         .appendingPathComponent("Cinecrique-StateChecks-\(UUID().uuidString)", isDirectory: true)
@@ -136,7 +165,7 @@ do {
     let prunedSnapshots = try fileManager.contentsOfDirectory(at: snapshotsDirectory, includingPropertiesForKeys: nil)
     try expect(prunedSnapshots.count == 10, "snapshot cap remains stable after recovery")
 
-    print("AnalyseCoreChecks: 25 checks passed")
+    print("AnalyseCoreChecks: 31 checks passed")
 } catch {
     fputs("AnalyseCoreChecks failed: \(error)\n", stderr)
     exit(1)

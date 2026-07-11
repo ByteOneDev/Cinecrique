@@ -9,6 +9,7 @@ import {
   parseTimecode,
   removeMarker,
   timelineKeyboardTarget,
+  timelinePointerTarget,
 } from "./markers.js";
 
 test("migrates the legacy Séquence scope to a real five-second range", () => {
@@ -60,4 +61,11 @@ test("maps timeline keyboard shortcuts and clamps them", () => {
   assert.equal(timelineKeyboardTarget("PageDown", 2, 10, 25), 0);
   assert.equal(timelineKeyboardTarget("End", 2, 10, 25), 10);
   assert.equal(timelineKeyboardTarget("x", 2, 10, 25), null);
+});
+
+test("maps and clamps pointer positions on the timeline", () => {
+  assert.equal(timelinePointerTarget(150, 100, 200, 120), 30);
+  assert.equal(timelinePointerTarget(20, 100, 200, 120), 0);
+  assert.equal(timelinePointerTarget(400, 100, 200, 120), 120);
+  assert.equal(timelinePointerTarget(150, 100, 0, 120), 0);
 });

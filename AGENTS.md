@@ -13,6 +13,7 @@ When implementing from a selected generated mock, treat that image as the source
 - A timecoded marker can contain a text note, a link, and frame annotations. Selecting it seeks the film and restores its note and annotations.
 - Frame annotation tools include note, arrow, rectangle, and point marker.
 - The Fountain editor offers contextual inline completion. The proposed suffix is shown in muted text and accepted with Tab.
+- At compact macOS widths, transport controls and contextual menus must remain fully visible. Controls may wrap to a second row, and note/menu labels should wrap instead of being clipped with ellipses.
 - Notes, Markdown, and Fountain editing surfaces use JetBrains Mono while the surrounding interface keeps its native sans-serif typography.
 - The project rail can collapse into a compact icon-and-poster strip, and its state persists between launches independently of the workspace split position.
 - The product name is “Cinécrique”. Its title is “Analyse filmique, image par image” and its description is “L’atelier local pour analyser, annoter et réécrire films et séries.” The identity uses a framing-C mark with a playhead and timecoded marker.

@@ -15,6 +15,10 @@ export const nativeBridge = {
     window.addEventListener(eventName, listener);
     return () => window.removeEventListener(eventName, listener);
   },
+
+  readyForEvents() {
+    return this.call("frontendReady");
+  },
 };
 
 export function isNativeApp() {
