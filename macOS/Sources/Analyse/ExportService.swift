@@ -2,6 +2,7 @@ import AppKit
 import AVFoundation
 import Foundation
 import AnalyseCore
+import WebKit
 
 enum ExportService {
     struct TextFile {
@@ -21,6 +22,32 @@ enum ExportService {
         let frames: [Frame]
     }
 
+    struct ReportFrame {
+        let title: String
+        let timecode: String
+        let time: Double
+        let annotations: [[String: Any]]
+    }
+
+    struct Report {
+        enum Format: String {
+            case html
+            case pdf
+        }
+
+        let name: String
+        let format: Format
+        let model: [String: Any]
+        let frames: [ReportFrame]
+    }
+
+    struct ComparisonFrame {
+        let title: String
+        let timecode: String
+        let time: Double
+        let annotations: [[String: Any]]
+    }
+
     static func writeSingleText(_ file: TextFile, to destination: URL) throws {
         guard let data = file.content.data(using: .utf8) else { throw ExportError.invalidText }
         try data.write(to: destination, options: .atomic)
@@ -33,12 +60,17 @@ enum ExportService {
     }
 
     static func writeFrame(_ frame: Frame, mediaURL: URL, to destination: URL) throws {
+        let png = try renderFrameData(time: frame.time, annotations: frame.annotations, mediaURL: mediaURL)
+        try png.write(to: destination, options: .atomic)
+    }
+
+    private static func renderFrameData(time: Double, annotations: [[String: Any]], mediaURL: URL) throws -> Data {
         let asset = AVURLAsset(url: mediaURL)
         let generator = AVAssetImageGenerator(asset: asset)
         generator.appliesPreferredTrackTransform = true
         generator.requestedTimeToleranceBefore = CMTime(value: 1, timescale: 600)
         generator.requestedTimeToleranceAfter = CMTime(value: 1, timescale: 600)
-        let requestedTime = CMTime(seconds: max(0, frame.time), preferredTimescale: 600)
+        let requestedTime = CMTime(seconds: max(0, time), preferredTimescale: 600)
         let image = try generator.copyCGImage(at: requestedTime, actualTime: nil)
         let size = NSSize(width: image.width, height: image.height)
         let composed = NSImage(size: size)
@@ -50,7 +82,7 @@ enum ExportService {
             composed.unlockFocus()
             throw ExportError.frameRenderingFailed
         }
-        draw(frame.annotations, in: context, size: size)
+        draw(annotations, in: context, size: size)
         composed.unlockFocus()
 
         guard
@@ -58,7 +90,25 @@ enum ExportService {
             let bitmap = NSBitmapImageRep(data: tiff),
             let png = bitmap.representation(using: .png, properties: [:])
         else { throw ExportError.frameRenderingFailed }
-        try png.write(to: destination, options: .atomic)
+        return png
+    }
+
+    static func renderPreview(time: Double, mediaURL: URL, maximumWidth: CGFloat) throws -> Data {
+        let asset = AVURLAsset(url: mediaURL)
+        let generator = AVAssetImageGenerator(asset: asset)
+        generator.appliesPreferredTrackTransform = true
+        generator.maximumSize = NSSize(width: maximumWidth, height: maximumWidth)
+        generator.requestedTimeToleranceBefore = CMTime(value: 1, timescale: 24)
+        generator.requestedTimeToleranceAfter = CMTime(value: 1, timescale: 24)
+        let image = try generator.copyCGImage(
+            at: CMTime(seconds: max(0, time), preferredTimescale: 600),
+            actualTime: nil
+        )
+        let representation = NSBitmapImageRep(cgImage: image)
+        guard let data = representation.representation(using: .jpeg, properties: [.compressionFactor: 0.78]) else {
+            throw ExportError.frameRenderingFailed
+        }
+        return data
     }
 
     static func writeArchive(
@@ -67,6 +117,7 @@ enum ExportService {
         mediaURL: URL?,
         includeVideo: Bool,
         frames: [Frame],
+        reports: [Report],
         projectPackage: ProjectPackage?,
         to destination: URL
     ) throws {
@@ -86,6 +137,9 @@ enum ExportService {
             guard let mediaURL else { throw ExportError.missingMedia }
             try writeFrame(frame, mediaURL: mediaURL, to: packageDirectory.appendingPathComponent(frame.name))
         }
+        for report in reports {
+            try writeReport(report, mediaURL: mediaURL, to: packageDirectory.appendingPathComponent(report.name))
+        }
         if let projectPackage {
             try writeProjectPackage(
                 projectPackage,
@@ -96,6 +150,91 @@ enum ExportService {
         }
 
         try archiveDirectory(packageDirectory, keepingParent: true, to: destination)
+    }
+
+    static func writeReport(_ report: Report, mediaURL: URL?, to destination: URL) throws {
+        var images: [ReportImage] = []
+        if !report.frames.isEmpty {
+            guard let mediaURL else { throw ExportError.missingMedia }
+            images = try report.frames.prefix(100).map { frame in
+                let png = try renderFrameData(time: frame.time, annotations: frame.annotations, mediaURL: mediaURL)
+                return ReportImage(
+                    title: frame.title,
+                    timecode: frame.timecode,
+                    dataURL: "data:image/png;base64,\(png.base64EncodedString())"
+                )
+            }
+        }
+        let html = ReportHTMLBuilder.build(model: report.model, images: images)
+        switch report.format {
+        case .html:
+            guard let data = html.data(using: .utf8) else { throw ExportError.invalidText }
+            try data.write(to: destination, options: .atomic)
+        case .pdf:
+            try ReportPDFRenderer.write(html: html, to: destination)
+        }
+    }
+
+    static func writeComparison(
+        a: ComparisonFrame,
+        b: ComparisonFrame,
+        note: String,
+        mediaURL: URL,
+        to destination: URL
+    ) throws {
+        let aData = try renderFrameData(time: a.time, annotations: a.annotations, mediaURL: mediaURL)
+        let bData = try renderFrameData(time: b.time, annotations: b.annotations, mediaURL: mediaURL)
+        guard let aImage = NSImage(data: aData), let bImage = NSImage(data: bData) else {
+            throw ExportError.frameRenderingFailed
+        }
+
+        let canvasSize = NSSize(width: 2_400, height: 1_520)
+        let canvas = NSImage(size: canvasSize)
+        canvas.lockFocus()
+        NSColor(calibratedRed: 0.045, green: 0.06, blue: 0.067, alpha: 1).setFill()
+        NSRect(origin: .zero, size: canvasSize).fill()
+
+        let margin: CGFloat = 60
+        let gap: CGFloat = 32
+        let labelHeight: CGFloat = 88
+        let noteHeight: CGFloat = note.isEmpty ? 80 : 250
+        let imageWidth = (canvasSize.width - margin * 2 - gap) / 2
+        let imageHeight = canvasSize.height - margin * 2 - labelHeight - noteHeight
+        let imageY = noteHeight + margin
+        let leftRect = NSRect(x: margin, y: imageY, width: imageWidth, height: imageHeight)
+        let rightRect = NSRect(x: margin + imageWidth + gap, y: imageY, width: imageWidth, height: imageHeight)
+
+        drawComparisonImage(aImage, in: leftRect)
+        drawComparisonImage(bImage, in: rightRect)
+        drawComparisonLabel(a, label: "A", x: leftRect.minX, y: leftRect.maxY + 18, width: imageWidth)
+        drawComparisonLabel(b, label: "B", x: rightRect.minX, y: rightRect.maxY + 18, width: imageWidth)
+
+        if !note.isEmpty {
+            let headingAttributes: [NSAttributedString.Key: Any] = [
+                .font: NSFont.systemFont(ofSize: 19, weight: .semibold),
+                .foregroundColor: NSColor(calibratedRed: 0.86, green: 0.65, blue: 0.25, alpha: 1),
+            ]
+            ("NOTE COMPARATIVE" as NSString).draw(at: NSPoint(x: margin, y: 182), withAttributes: headingAttributes)
+            let style = NSMutableParagraphStyle()
+            style.lineBreakMode = .byWordWrapping
+            let noteAttributes: [NSAttributedString.Key: Any] = [
+                .font: NSFont.monospacedSystemFont(ofSize: 18, weight: .regular),
+                .foregroundColor: NSColor(calibratedWhite: 0.86, alpha: 1),
+                .paragraphStyle: style,
+            ]
+            (String(note.prefix(20_000)) as NSString).draw(
+                in: NSRect(x: margin, y: 48, width: canvasSize.width - margin * 2, height: 122),
+                withAttributes: noteAttributes
+            )
+        }
+        canvas.unlockFocus()
+
+        guard
+            let tiff = canvas.tiffRepresentation,
+            let bitmap = NSBitmapImageRep(data: tiff),
+            let png = bitmap.representation(using: .png, properties: [:])
+        else { throw ExportError.frameRenderingFailed }
+        try png.write(to: destination, options: .atomic)
     }
 
     static func writeProjectPackage(
@@ -158,6 +297,45 @@ enum ExportService {
         try process.run()
         process.waitUntilExit()
         guard process.terminationStatus == 0 else { throw ExportError.archiveFailed }
+    }
+
+    private static func drawComparisonImage(_ image: NSImage, in rect: NSRect) {
+        NSColor.black.setFill()
+        rect.fill()
+        let imageSize = image.size
+        guard imageSize.width > 0, imageSize.height > 0 else { return }
+        let scale = min(rect.width / imageSize.width, rect.height / imageSize.height)
+        let targetSize = NSSize(width: imageSize.width * scale, height: imageSize.height * scale)
+        let target = NSRect(
+            x: rect.midX - targetSize.width / 2,
+            y: rect.midY - targetSize.height / 2,
+            width: targetSize.width,
+            height: targetSize.height
+        )
+        image.draw(in: target, from: .zero, operation: .sourceOver, fraction: 1)
+        NSColor(calibratedWhite: 0.28, alpha: 1).setStroke()
+        NSBezierPath(rect: rect).stroke()
+    }
+
+    private static func drawComparisonLabel(_ frame: ComparisonFrame, label: String, x: CGFloat, y: CGFloat, width: CGFloat) {
+        let labelAttributes: [NSAttributedString.Key: Any] = [
+            .font: NSFont.monospacedSystemFont(ofSize: 18, weight: .bold),
+            .foregroundColor: NSColor(calibratedRed: 0.88, green: 0.67, blue: 0.28, alpha: 1),
+        ]
+        (label as NSString).draw(at: NSPoint(x: x, y: y), withAttributes: labelAttributes)
+        let timecodeAttributes: [NSAttributedString.Key: Any] = [
+            .font: NSFont.monospacedSystemFont(ofSize: 18, weight: .medium),
+            .foregroundColor: NSColor(calibratedWhite: 0.9, alpha: 1),
+        ]
+        (frame.timecode as NSString).draw(at: NSPoint(x: x + 34, y: y), withAttributes: timecodeAttributes)
+        let titleAttributes: [NSAttributedString.Key: Any] = [
+            .font: NSFont.systemFont(ofSize: 17, weight: .regular),
+            .foregroundColor: NSColor(calibratedWhite: 0.65, alpha: 1),
+        ]
+        (String(frame.title.prefix(500)) as NSString).draw(
+            in: NSRect(x: x, y: y + 31, width: width, height: 34),
+            withAttributes: titleAttributes
+        )
     }
 
     private static func draw(_ annotations: [[String: Any]], in context: CGContext, size: NSSize) {
@@ -234,6 +412,8 @@ enum ExportService {
         case archiveFailed
         case invalidProject
         case projectTooLarge
+        case reportRenderingFailed
+        case reportRenderingTimedOut
 
         var errorDescription: String? {
             switch self {
@@ -243,7 +423,88 @@ enum ExportService {
             case .archiveFailed: return "L’archive ZIP n’a pas pu être créée."
             case .invalidProject: return "Le projet Cinécrique est invalide."
             case .projectTooLarge: return "Le projet Cinécrique dépasse la limite de 32 Mo."
+            case .reportRenderingFailed: return "Le rapport PDF n’a pas pu être généré."
+            case .reportRenderingTimedOut: return "La génération du rapport PDF a dépassé le délai autorisé."
             }
         }
+    }
+}
+
+private final class ReportPDFRenderer: NSObject, WKNavigationDelegate {
+    private let html: String
+    private let destination: URL
+    private let semaphore = DispatchSemaphore(value: 0)
+    private var renderingError: Error?
+    private var completed = false
+    private var webView: WKWebView?
+
+    private init(html: String, destination: URL) {
+        self.html = html
+        self.destination = destination
+    }
+
+    static func write(html: String, to destination: URL) throws {
+        guard !Thread.isMainThread else { throw ExportService.ExportError.reportRenderingFailed }
+        let renderer = ReportPDFRenderer(html: html, destination: destination)
+        DispatchQueue.main.async { renderer.start() }
+        guard renderer.semaphore.wait(timeout: .now() + 60) == .success else {
+            throw ExportService.ExportError.reportRenderingTimedOut
+        }
+        if let error = renderer.renderingError { throw error }
+        guard
+            let handle = try? FileHandle(forReadingFrom: destination),
+            let prefix = try? handle.read(upToCount: 5),
+            prefix == Data("%PDF-".utf8)
+        else { throw ExportService.ExportError.reportRenderingFailed }
+    }
+
+    private func start() {
+        let configuration = WKWebViewConfiguration()
+        configuration.websiteDataStore = .nonPersistent()
+        let preferences = WKWebpagePreferences()
+        preferences.allowsContentJavaScript = false
+        configuration.defaultWebpagePreferences = preferences
+        let view = WKWebView(frame: NSRect(x: 0, y: 0, width: 1_120, height: 792), configuration: configuration)
+        view.navigationDelegate = self
+        webView = view
+        view.loadHTMLString(html, baseURL: nil)
+    }
+
+    func webView(_ webView: WKWebView, didFinish navigation: WKNavigation!) {
+        webView.layoutSubtreeIfNeeded()
+        let printInfo = NSPrintInfo.shared.copy() as! NSPrintInfo
+        printInfo.paperSize = NSSize(width: 841.89, height: 595.28)
+        printInfo.orientation = .landscape
+        printInfo.topMargin = 28
+        printInfo.bottomMargin = 28
+        printInfo.leftMargin = 28
+        printInfo.rightMargin = 28
+        printInfo.jobDisposition = .save
+        printInfo.dictionary()[NSPrintInfo.AttributeKey.jobSavingURL] = destination
+        let operation = webView.printOperation(with: printInfo)
+        operation.showsPrintPanel = false
+        operation.showsProgressPanel = false
+        guard operation.run() else {
+            finish(ExportService.ExportError.reportRenderingFailed)
+            return
+        }
+        finish(nil)
+    }
+
+    func webView(_ webView: WKWebView, didFail navigation: WKNavigation!, withError error: Error) {
+        finish(error)
+    }
+
+    func webView(_ webView: WKWebView, didFailProvisionalNavigation navigation: WKNavigation!, withError error: Error) {
+        finish(error)
+    }
+
+    private func finish(_ error: Error?) {
+        guard !completed else { return }
+        completed = true
+        renderingError = error
+        webView?.navigationDelegate = nil
+        webView = nil
+        semaphore.signal()
     }
 }

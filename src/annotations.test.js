@@ -1,7 +1,23 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { annotationLabel, moveAnnotation, simplifyStroke, updatePointLabel } from "./annotations.js";
+import {
+  annotationLabel,
+  annotationsAtTime,
+  migrateAnnotationTimes,
+  moveAnnotation,
+  shiftAnnotationTimes,
+  simplifyStroke,
+  updatePointLabel,
+} from "./annotations.js";
+
+test("shows annotations only on their captured video frame", () => {
+  const annotations = [{ id: "legacy" }, { id: "timed", time: 10 }];
+  assert.deepEqual(annotationsAtTime(annotations, 10, 10, 25).map(({ id }) => id), ["legacy", "timed"]);
+  assert.deepEqual(annotationsAtTime(annotations, 10 + 1 / 25, 10, 25), []);
+  assert.equal(migrateAnnotationTimes([{ id: "legacy" }], 12.5)[0].time, 12.5);
+  assert.equal(shiftAnnotationTimes([{ id: "legacy" }], 2, 12.5)[0].time, 14.5);
+});
 
 test("moves point and rectangle annotations within the frame", () => {
   assert.deepEqual(moveAnnotation({ type: "point", x: 0.95, y: 0.1 }, 0.2, -0.2), { type: "point", x: 1, y: 0 });

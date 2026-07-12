@@ -136,6 +136,32 @@ do {
         ProjectArchivePolicy.portableMediaFileName(for: "film.🎞") == "media",
         "portable media names reject unsafe extensions"
     )
+    try expect(MediaFormatPolicy.acceptsVideoExtension("MKV"), "accept common MKV containers")
+    try expect(MediaFormatPolicy.acceptsVideoExtension("mxf"), "accept professional MXF containers")
+    try expect(MediaFormatPolicy.acceptsVideoExtension("vob"), "accept legacy DVD video containers")
+    try expect(!MediaFormatPolicy.acceptsVideoExtension("exe"), "reject non-video extensions")
+
+    let reportHTML = ReportHTMLBuilder.build(model: [
+        "title": "Film <script>alert(1)</script>",
+        "projectInfo": [["label": "Cadence", "value": "24 i/s"]],
+        "markers": [[
+            "start": "00:00:01:00",
+            "title": "Lien",
+            "detail": "Texte <b>non fiable</b>",
+            "url": "javascript:alert(1)",
+        ]],
+        "analysis": "# Analyse\n\n<script>alert(2)</script>",
+    ])
+    try expect(reportHTML.contains("Film &lt;script&gt;alert(1)&lt;/script&gt;"), "report escapes titles")
+    try expect(reportHTML.contains("Texte &lt;b&gt;non fiable&lt;/b&gt;"), "report escapes marker content")
+    try expect(!reportHTML.contains("href=\"javascript:"), "report rejects executable links")
+    try expect(reportHTML.contains("Content-Security-Policy"), "report carries an offline CSP")
+
+    let allowedReportLink = ReportHTMLBuilder.build(model: [
+        "title": "Film",
+        "markers": [["start": "00:00:01:00", "title": "Source", "url": "https://example.com/page"]],
+    ])
+    try expect(allowedReportLink.contains("href=\"https://example.com/page\""), "report allows HTTP(S) links")
 
     let fileManager = FileManager.default
     let storeDirectory = fileManager.temporaryDirectory
@@ -165,7 +191,7 @@ do {
     let prunedSnapshots = try fileManager.contentsOfDirectory(at: snapshotsDirectory, includingPropertiesForKeys: nil)
     try expect(prunedSnapshots.count == 10, "snapshot cap remains stable after recovery")
 
-    print("AnalyseCoreChecks: 31 checks passed")
+    print("AnalyseCoreChecks: 40 checks passed")
 } catch {
     fputs("AnalyseCoreChecks failed: \(error)\n", stderr)
     exit(1)

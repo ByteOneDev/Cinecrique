@@ -8,6 +8,24 @@ function parseClock(value) {
   return hours * 3600 + minutes * 60 + seconds + fraction / 1000;
 }
 
+export const VIDEO_EXTENSIONS = Object.freeze([
+  "mov", "qt", "mp4", "m4v", "f4v", "mkv", "webm", "avi", "divx",
+  "mpg", "mpeg", "m1v", "m2v", "vob", "ts", "mts", "m2ts", "mxf",
+  "3gp", "3g2", "ogv", "ogg", "wmv", "asf", "flv",
+]);
+
+export function isSupportedVideoFile(file) {
+  const extension = String(file?.name || "").split(".").pop()?.toLocaleLowerCase("fr") || "";
+  return Boolean(file?.type?.startsWith("video/") || VIDEO_EXTENSIONS.includes(extension));
+}
+
+export function mediaPlaybackIssue(metadata, fileName = "") {
+  const video = metadata?.streams?.find((stream) => stream.codec_type === "video");
+  const codec = video?.codec_long_name || video?.codec_name?.toUpperCase() || "de la piste vidéo";
+  const extension = String(fileName || "").split(".").pop()?.toLocaleUpperCase("fr") || "vidéo";
+  return `Le conteneur ${extension} est reconnu, mais le codec ${codec} n’est pas décodable par WebKit sur ce Mac.`;
+}
+
 function stripAssFormatting(text) {
   return text
     .replace(/\{[^}]*\}/g, "")
@@ -27,7 +45,7 @@ function parseAss(content) {
     if (start == null || end == null) continue;
     cues.push({ start, end, text: stripAssFormatting(pieces.slice(9).join(",")) });
   }
-  return cues;
+  return cues.sort((a, b) => a.start - b.start);
 }
 
 export function parseSubtitles(content, fileName = "") {
@@ -54,11 +72,53 @@ export function parseSubtitles(content, fileName = "") {
       .trim();
     if (text) cues.push({ start, end, text });
   }
-  return cues;
+  return cues.sort((a, b) => a.start - b.start);
 }
 
 export function subtitleAt(cues, time) {
-  return cues.find((cue) => time >= cue.start && time <= cue.end)?.text || "";
+  const index = subtitleIndexAt(cues, time);
+  return index >= 0 ? cues[index].text : "";
+}
+
+export function subtitleIndexAt(cues, time) {
+  const items = Array.isArray(cues) ? cues : [];
+  const position = Number(time);
+  let low = 0;
+  let high = items.length - 1;
+  let candidate = -1;
+  while (low <= high) {
+    const middle = Math.floor((low + high) / 2);
+    if (Number(items[middle].start) <= position) {
+      candidate = middle;
+      low = middle + 1;
+    } else {
+      high = middle - 1;
+    }
+  }
+  if (candidate >= 0 && position <= Number(items[candidate].end)) return candidate;
+  return -1;
+}
+
+export function filterSubtitles(cues, query = "") {
+  const normalized = String(query || "").trim().toLocaleLowerCase("fr");
+  return (Array.isArray(cues) ? cues : []).map((cue, index) => ({ cue, index }))
+    .filter(({ cue }) => !normalized || String(cue.text || "").toLocaleLowerCase("fr").includes(normalized));
+}
+
+export function subtitleNoteDraft(cue, formatTimecode) {
+  const text = String(cue?.text || "").trim();
+  const title = text.split(/\n/)[0].slice(0, 120) || "Dialogue";
+  return {
+    type: "note",
+    title,
+    body: text,
+    url: "",
+    tag: "Dialogue",
+    kind: "point",
+    startTimecode: formatTimecode(Number(cue?.start) || 0),
+    endTimecode: formatTimecode(Number(cue?.end) || Number(cue?.start) || 0),
+    bookmarked: false,
+  };
 }
 
 function streamOfType(metadata, type) {

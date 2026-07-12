@@ -17,6 +17,7 @@ test("migrates the legacy Séquence scope to a real five-second range", () => {
   assert.equal(marker.endTime, 17);
   assert.equal(marker.scope, undefined);
   assert.equal(markerIsRange(marker), true);
+  assert.deepEqual(marker.shot, { shotType: "", movement: "", characters: "", sound: "" });
 });
 
 test("combines search, type, tag, favorite and time filters", () => {

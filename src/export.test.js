@@ -6,12 +6,20 @@ import { buildTextExportFiles, exportSelectionCount, markerMarkdown, safeExportB
 test("builds only the selected text exports with safe names", () => {
   const files = buildTextExportFiles({ script: true, analysis: true, markers: false }, {
     title: "Cléo / 5 à 7",
-    format: "Fountain",
     script: "INT. CAFÉ — JOUR",
     analysis: "# Notes",
   });
   assert.deepEqual(files.map((file) => file.name), ["Cleo-5-a-7-script.fountain", "Cleo-5-a-7-analyse.md"]);
   assert.equal(safeExportBaseName("../../"), "cinecrique");
+});
+
+test("always exports the scenario as Fountain", () => {
+  const files = buildTextExportFiles({ script: true }, {
+    title: "Film",
+    format: "Markdown",
+    script: "INT. SALON — JOUR",
+  });
+  assert.equal(files[0].name, "Film-script.fountain");
 });
 
 test("formats range markers in Markdown", () => {
@@ -31,4 +39,8 @@ test("counts a project package without exposing it as a plain text export", () =
   const options = { project: true, portableProject: true };
   assert.equal(exportSelectionCount(options), 1);
   assert.deepEqual(buildTextExportFiles(options, { title: "Film" }), []);
+});
+
+test("counts HTML and PDF reports as distinct export items", () => {
+  assert.equal(exportSelectionCount({ reportHtml: true, reportPdf: true }), 2);
 });

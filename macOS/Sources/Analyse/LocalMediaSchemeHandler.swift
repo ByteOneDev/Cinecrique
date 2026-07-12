@@ -177,7 +177,5 @@ final class LocalMediaSchemeHandler: NSObject, WKURLSchemeHandler {
         }
     }
 
-    private static let videoExtensions: Set<String> = [
-        "mov", "mp4", "m4v", "mkv", "avi", "webm", "mpg", "mpeg", "ts", "m2ts"
-    ]
+    private static let videoExtensions = MediaFormatPolicy.videoExtensions
 }

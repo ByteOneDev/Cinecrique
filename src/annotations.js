@@ -1,5 +1,34 @@
 const clamp = (value, min = 0, max = 1) => Math.min(Math.max(value, min), max);
 
+export function annotationFrameTime(annotation, markerTime = 0) {
+  const value = Number(annotation?.time);
+  return Number.isFinite(value) && value >= 0 ? value : Math.max(0, Number(markerTime) || 0);
+}
+
+export function annotationsAtTime(annotations, currentTime, markerTime = 0, frameRate = 24) {
+  const rate = Math.max(Number(frameRate) || 24, 1);
+  const currentFrame = Math.round(Math.max(0, Number(currentTime) || 0) * rate);
+  return (Array.isArray(annotations) ? annotations : []).filter((annotation) => (
+    Math.round(annotationFrameTime(annotation, markerTime) * rate) === currentFrame
+  ));
+}
+
+export function migrateAnnotationTimes(annotations, markerTime = 0) {
+  return (Array.isArray(annotations) ? annotations : []).map((annotation) => ({
+    ...annotation,
+    time: annotationFrameTime(annotation, markerTime),
+  }));
+}
+
+export function shiftAnnotationTimes(annotations, delta, markerTime = 0) {
+  const offset = Number(delta);
+  if (!Number.isFinite(offset)) return migrateAnnotationTimes(annotations, markerTime);
+  return migrateAnnotationTimes(annotations, markerTime).map((annotation) => ({
+    ...annotation,
+    time: Math.max(0, annotation.time + offset),
+  }));
+}
+
 export function moveAnnotation(annotation, deltaX, deltaY) {
   if (!annotation) return annotation;
   if (annotation.type === "point") {

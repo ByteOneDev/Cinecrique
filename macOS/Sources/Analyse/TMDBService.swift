@@ -67,6 +67,43 @@ final class TMDBService {
         }
     }
 
+    func coverData(
+        posterPath: String,
+        completion: @escaping (Result<Data, Error>) -> Void
+    ) {
+        let allowed = CharacterSet(charactersIn: "/abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789._-")
+        guard
+            posterPath.hasPrefix("/"),
+            posterPath.count <= 200,
+            posterPath.unicodeScalars.allSatisfy({ allowed.contains($0) }),
+            let url = URL(string: "https://image.tmdb.org/t/p/w780\(posterPath)")
+        else {
+            completion(.failure(TMDBError.invalidURL))
+            return
+        }
+        var request = URLRequest(url: url)
+        request.timeoutInterval = 30
+        request.cachePolicy = .reloadIgnoringLocalCacheData
+        session.dataTask(with: request) { data, response, error in
+            if let error {
+                completion(.failure(error))
+                return
+            }
+            guard
+                let httpResponse = response as? HTTPURLResponse,
+                (200...299).contains(httpResponse.statusCode),
+                let data,
+                !data.isEmpty,
+                data.count <= 10 * 1_024 * 1_024,
+                httpResponse.mimeType?.hasPrefix("image/") == true
+            else {
+                completion(.failure(TMDBError.invalidResponse))
+                return
+            }
+            completion(.success(data))
+        }.resume()
+    }
+
     private func request(
         path: String,
         queryItems: [URLQueryItem],
@@ -140,7 +177,8 @@ final class TMDBService {
             "originalTitle": originalTitle,
             "releaseDate": releaseDate,
             "year": String(releaseDate.prefix(4)),
-            "overview": overview
+            "overview": overview,
+            "posterPath": (item["poster_path"] as? String) ?? ""
         ]
     }
 
@@ -173,6 +211,7 @@ final class TMDBService {
             "originalLanguage": (item["original_language"] as? String) ?? "",
             "language": language,
             "source": "TMDB",
+            "posterPath": (item["poster_path"] as? String) ?? "",
             "sourceURL": "https://www.themoviedb.org/\(mediaType)/\(identifier)"
         ]
     }

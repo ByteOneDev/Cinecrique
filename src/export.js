@@ -9,6 +9,8 @@ export const defaultExportSelection = () => ({
   allFrames: false,
   project: false,
   portableProject: false,
+  reportHtml: false,
+  reportPdf: false,
 });
 
 export function safeExportBaseName(value) {
@@ -38,7 +40,7 @@ export function buildTextExportFiles(options, data) {
   const base = safeExportBaseName(data.title);
   const files = [];
   if (options.script) {
-    files.push({ name: `${base}-script.${data.format === "Markdown" ? "md" : "fountain"}`, content: data.script || "" });
+    files.push({ name: `${base}-script.fountain`, content: data.script || "" });
   }
   if (options.analysis) files.push({ name: `${base}-analyse.md`, content: data.analysis || "" });
   if (options.markers) files.push({ name: `${base}-reperes.md`, content: markerMarkdown(data.markers, data.formatTimecode) });
@@ -48,7 +50,7 @@ export function buildTextExportFiles(options, data) {
 }
 
 export function exportSelectionCount(options, annotatedFrameCount = 0) {
-  const textCount = ["script", "analysis", "markers", "subtitles", "metadata", "project"]
+  const textCount = ["script", "analysis", "markers", "subtitles", "metadata", "project", "reportHtml", "reportPdf"]
     .filter((key) => options[key]).length;
   const frameCount = options.allFrames ? annotatedFrameCount : options.currentFrame ? 1 : 0;
   return textCount + (options.video ? 1 : 0) + frameCount;

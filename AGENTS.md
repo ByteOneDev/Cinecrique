@@ -20,3 +20,12 @@ When implementing from a selected generated mock, treat that image as the source
 - The bundled demonstration projects remain available as a guided local starting point and must stay compatible with persisted projects.
 - Export is selective: script, Markdown analysis, timecoded notes, original video, subtitles, metadata, one annotated frame, all annotated frames, or the complete Cinécrique project. One item exports directly; multiple items form an organized archive.
 - Transport controls, the timeline, the center divider, and the collapsed project rail must remain visually separated and usable at the minimum macOS window size.
+- `Scénario` is exclusively Fountain with contextual Tab completion and whole-scene navigation; `Notes` remains exclusively Markdown.
+- Professional transport includes persistent A/B looping, selectable playback speeds, J/K/L shuttle behavior, persistent mute, silent playback, and user-configurable single-key shortcuts.
+- Timecode settings are project-specific and affect display only: automatic or manual common rates, offset, and 29.97 drop-frame support never move media-linked data.
+- `Transcription` synchronizes imported subtitle cues and `Plans` derives editable shot rows directly from range markers without duplicating project data.
+- Professional reports are selective local HTML/PDF exports, and image comparison stores only `{time, markerId}` references while regenerating frames and annotations on demand.
+- Frame annotations are visible only on the exact captured media frame; they remain available from the timecoded marker history.
+- Project covers can use a local image, a TMDB poster, the current frame, text, or the centered Cinécrique mark on black. Missing covers never receive a random image.
+- Common video containers are accepted through one shared web/native policy, while actual playback remains codec-dependent and reports an explicit compatibility error.
+- V1 release artifacts are built as a versioned DMG with a SHA-256 companion file and validated through `npm run release:check`.

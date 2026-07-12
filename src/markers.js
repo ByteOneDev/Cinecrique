@@ -1,3 +1,5 @@
+import { normalizeShot } from "./shots.js";
+
 const MARKER_TYPES = new Set(["note", "link", "frame"]);
 
 export function markerIsRange(marker) {
@@ -25,6 +27,8 @@ export function migrateMarker(marker, legacyRangeSeconds = 5) {
   } else {
     delete migrated.endTime;
   }
+  if (migrated.endTime > time) migrated.shot = normalizeShot(marker?.shot);
+  else delete migrated.shot;
   delete migrated.scope;
   return migrated;
 }

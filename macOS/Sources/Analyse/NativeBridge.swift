@@ -116,6 +116,14 @@ final class NativeBridge: NSObject, WKScriptMessageHandler {
                 return
             }
             inspectMetadata(path: path, identifier: identifier)
+        case "renderThumbnail":
+            renderThumbnail(payload: payload, identifier: identifier)
+        case "chooseCoverImage":
+            chooseCoverImage(identifier: identifier)
+        case "captureCoverFrame":
+            captureCoverFrame(payload: payload, identifier: identifier)
+        case "downloadTMDBCover":
+            downloadTMDBCover(payload: payload, identifier: identifier)
         case "saveState":
             saveState(payload: payload, identifier: identifier)
         case "loadState":
@@ -126,6 +134,8 @@ final class NativeBridge: NSObject, WKScriptMessageHandler {
             importProject(identifier: identifier)
         case "exportSelection":
             exportSelection(payload: payload, identifier: identifier)
+        case "exportComparison":
+            exportComparison(payload: payload, identifier: identifier)
         case "revealInFinder":
             guard
                 let path = payload["path"] as? String,
@@ -274,6 +284,73 @@ final class NativeBridge: NSObject, WKScriptMessageHandler {
         }
     }
 
+    private func chooseCoverImage(identifier: String) {
+        DispatchQueue.main.async { [weak self] in
+            let panel = NSOpenPanel()
+            panel.title = "Choisir une couverture"
+            panel.prompt = "Choisir"
+            panel.canChooseFiles = true
+            panel.canChooseDirectories = false
+            panel.allowsMultipleSelection = false
+            panel.allowedContentTypes = Self.coverImageTypes
+            guard panel.runModal() == .OK, let url = panel.url else {
+                self?.respond(identifier: identifier, result: ["cancelled": true])
+                return
+            }
+            self?.workQueue.async { [weak self] in
+                do {
+                    let dataURL = try CoverService.dataURL(fromFile: url)
+                    self?.respond(identifier: identifier, result: ["cancelled": false, "dataURL": dataURL])
+                } catch {
+                    self?.respond(identifier: identifier, error: error.localizedDescription)
+                }
+            }
+        }
+    }
+
+    private func captureCoverFrame(payload: [String: Any], identifier: String) {
+        workQueue.async { [weak self] in
+            do {
+                guard
+                    let path = payload["path"] as? String,
+                    path.utf8.count <= 16_384,
+                    let time = (payload["time"] as? NSNumber)?.doubleValue,
+                    time.isFinite,
+                    time >= 0
+                else { throw SelectionExportError.invalidItem }
+                let candidate = MediaAccessRegistry.normalizedURL(URL(fileURLWithPath: path))
+                guard MediaAccessRegistry.shared.isApproved(candidate) else { throw SelectionExportError.missingMedia }
+                let mediaURL = try Self.validatedVideoURL(candidate)
+                let preview = try ExportService.renderPreview(time: time, mediaURL: mediaURL, maximumWidth: 1_200)
+                let dataURL = try CoverService.dataURL(from: preview)
+                self?.respond(identifier: identifier, result: ["dataURL": dataURL])
+            } catch {
+                self?.respond(identifier: identifier, error: error.localizedDescription)
+            }
+        }
+    }
+
+    private func downloadTMDBCover(payload: [String: Any], identifier: String) {
+        guard let posterPath = payload["posterPath"] as? String else {
+            respond(identifier: identifier, error: "Affiche TMDB manquante.")
+            return
+        }
+        tmdbService.coverData(posterPath: posterPath) { [weak self] result in
+            self?.workQueue.async {
+                switch result {
+                case .success(let data):
+                    do {
+                        self?.respond(identifier: identifier, result: ["dataURL": try CoverService.dataURL(from: data)])
+                    } catch {
+                        self?.respond(identifier: identifier, error: error.localizedDescription)
+                    }
+                case .failure(let error):
+                    self?.respond(identifier: identifier, error: error.localizedDescription)
+                }
+            }
+        }
+    }
+
     private func chooseSubtitle(identifier: String) {
         DispatchQueue.main.async { [weak self] in
             let panel = NSOpenPanel()
@@ -389,7 +466,7 @@ final class NativeBridge: NSObject, WKScriptMessageHandler {
             "cancelled": false,
             "name": safeURL.lastPathComponent,
             "state": result.state,
-            "recovered": result.version < 5,
+            "recovered": result.version < 6,
             "portable": result.portable,
         ]
     }
@@ -489,6 +566,40 @@ final class NativeBridge: NSObject, WKScriptMessageHandler {
             do {
                 let metadata = try FFprobeService.inspect(Self.validatedVideoURL(url))
                 self?.respond(identifier: identifier, result: metadata)
+            } catch {
+                self?.respond(identifier: identifier, error: error.localizedDescription)
+            }
+        }
+    }
+
+    private func renderThumbnail(payload: [String: Any], identifier: String) {
+        guard
+            let path = payload["path"] as? String,
+            path.utf8.count <= 16_384,
+            let rawTime = payload["time"] as? NSNumber,
+            rawTime.doubleValue.isFinite,
+            rawTime.doubleValue >= 0
+        else {
+            respond(identifier: identifier, error: "Paramètres de miniature invalides.")
+            return
+        }
+        let width = min(max((payload["width"] as? NSNumber)?.doubleValue ?? 240, 80), 640)
+        let url = MediaAccessRegistry.normalizedURL(URL(fileURLWithPath: path))
+        guard MediaAccessRegistry.shared.isApproved(url) else {
+            respond(identifier: identifier, error: "Ce média n’a pas été autorisé.")
+            return
+        }
+        workQueue.async { [weak self] in
+            do {
+                let safeURL = try Self.validatedVideoURL(url)
+                let data = try ExportService.renderPreview(
+                    time: rawTime.doubleValue,
+                    mediaURL: safeURL,
+                    maximumWidth: CGFloat(width)
+                )
+                self?.respond(identifier: identifier, result: [
+                    "dataURL": "data:image/jpeg;base64,\(data.base64EncodedString())"
+                ])
             } catch {
                 self?.respond(identifier: identifier, error: error.localizedDescription)
             }
@@ -618,6 +729,7 @@ final class NativeBridge: NSObject, WKScriptMessageHandler {
 
             let rawFrames = payload["frames"] as? [[String: Any]] ?? []
             let frames = try Self.exportFrames(from: rawFrames)
+            let reports = try Self.exportReports(from: payload["reports"] as? [[String: Any]] ?? [])
 
             var projectPackage: ExportService.ProjectPackage?
             if let rawPackage = payload["projectPackage"] as? [String: Any] {
@@ -638,6 +750,7 @@ final class NativeBridge: NSObject, WKScriptMessageHandler {
             let includeVideo = (payload["includeVideo"] as? Bool) ?? false
             let needsMedia = includeVideo
                 || !frames.isEmpty
+                || reports.contains(where: { !$0.frames.isEmpty })
                 || projectPackage?.includeVideo == true
                 || !(projectPackage?.frames.isEmpty ?? true)
             var mediaURL: URL?
@@ -651,7 +764,7 @@ final class NativeBridge: NSObject, WKScriptMessageHandler {
                 mediaURL = try Self.validatedVideoURL(candidate)
             }
 
-            let itemCount = textFiles.count + (includeVideo ? 1 : 0) + frames.count + (projectPackage == nil ? 0 : 1)
+            let itemCount = textFiles.count + (includeVideo ? 1 : 0) + frames.count + reports.count + (projectPackage == nil ? 0 : 1)
             guard itemCount > 0 else { throw SelectionExportError.emptySelection }
             let baseName = Self.safeExportBaseName(payload["suggestedName"] as? String)
 
@@ -671,6 +784,9 @@ final class NativeBridge: NSObject, WKScriptMessageHandler {
                 } else if let frame = frames.first {
                     panel.nameFieldStringValue = frame.name
                     panel.allowedContentTypes = [.png]
+                } else if let report = reports.first {
+                    panel.nameFieldStringValue = report.name
+                    panel.allowedContentTypes = [UTType(filenameExtension: report.format.rawValue) ?? .data]
                 } else if projectPackage != nil {
                     panel.nameFieldStringValue = "\(baseName).cinecrique"
                     panel.allowedContentTypes = [Self.projectType]
@@ -690,6 +806,7 @@ final class NativeBridge: NSObject, WKScriptMessageHandler {
                                 mediaURL: mediaURL,
                                 includeVideo: includeVideo,
                                 frames: frames,
+                                reports: reports,
                                 projectPackage: projectPackage,
                                 to: destination
                             )
@@ -699,6 +816,8 @@ final class NativeBridge: NSObject, WKScriptMessageHandler {
                             try ExportService.copyVideo(from: mediaURL, to: destination)
                         } else if let frame = frames.first, let mediaURL {
                             try ExportService.writeFrame(frame, mediaURL: mediaURL, to: destination)
+                        } else if let report = reports.first {
+                            try ExportService.writeReport(report, mediaURL: mediaURL, to: destination)
                         } else if let projectPackage {
                             try ExportService.writeProjectPackage(
                                 projectPackage,
@@ -707,6 +826,47 @@ final class NativeBridge: NSObject, WKScriptMessageHandler {
                                 to: destination
                             )
                         }
+                        self?.respond(identifier: identifier, result: ["cancelled": false, "path": destination.path])
+                    } catch {
+                        self?.respond(identifier: identifier, error: error.localizedDescription)
+                    }
+                }
+            }
+        } catch {
+            respond(identifier: identifier, error: error.localizedDescription)
+        }
+    }
+
+    private func exportComparison(payload: [String: Any], identifier: String) {
+        do {
+            guard
+                let path = payload["mediaPath"] as? String,
+                path.utf8.count <= 16_384,
+                let rawA = payload["a"] as? [String: Any],
+                let rawB = payload["b"] as? [String: Any]
+            else { throw SelectionExportError.invalidItem }
+            let candidate = MediaAccessRegistry.normalizedURL(URL(fileURLWithPath: path))
+            guard MediaAccessRegistry.shared.isApproved(candidate) else { throw SelectionExportError.missingMedia }
+            let mediaURL = try Self.validatedVideoURL(candidate)
+            let a = try Self.comparisonFrame(from: rawA)
+            let b = try Self.comparisonFrame(from: rawB)
+            let note = String((payload["note"] as? String ?? "").prefix(20_000))
+            let suggestedName = Self.safeExportFileName(payload["suggestedName"] as? String) ?? "comparaison.png"
+            let fileName = suggestedName.lowercased().hasSuffix(".png") ? suggestedName : "\(suggestedName).png"
+
+            DispatchQueue.main.async { [weak self] in
+                let panel = NSSavePanel()
+                panel.title = "Exporter la comparaison"
+                panel.prompt = "Exporter"
+                panel.nameFieldStringValue = fileName
+                panel.allowedContentTypes = [.png]
+                guard panel.runModal() == .OK, let destination = panel.url else {
+                    self?.respond(identifier: identifier, result: ["cancelled": true])
+                    return
+                }
+                self?.workQueue.async { [weak self] in
+                    do {
+                        try ExportService.writeComparison(a: a, b: b, note: note, mediaURL: mediaURL, to: destination)
                         self?.respond(identifier: identifier, result: ["cancelled": false, "path": destination.path])
                     } catch {
                         self?.respond(identifier: identifier, error: error.localizedDescription)
@@ -763,6 +923,57 @@ final class NativeBridge: NSObject, WKScriptMessageHandler {
             let annotations = (item["annotations"] as? [[String: Any]] ?? []).prefix(1_000)
             return ExportService.Frame(name: name, time: time, annotations: Array(annotations))
         }
+    }
+
+    private static func exportReports(from rawReports: [[String: Any]]) throws -> [ExportService.Report] {
+        guard rawReports.count <= 2 else { throw SelectionExportError.tooManyItems }
+        return try rawReports.map { item in
+            guard
+                let rawFormat = item["format"] as? String,
+                let format = ExportService.Report.Format(rawValue: rawFormat.lowercased()),
+                let rawName = safeExportFileName(item["name"] as? String),
+                let model = item["model"] as? [String: Any],
+                JSONSerialization.isValidJSONObject(model),
+                let modelData = try? JSONSerialization.data(withJSONObject: model),
+                modelData.count <= 16 * 1_024 * 1_024
+            else { throw SelectionExportError.invalidItem }
+            let extensionName = format.rawValue
+            let name = rawName.lowercased().hasSuffix(".\(extensionName)") ? rawName : "\(rawName).\(extensionName)"
+            let rawFrames = item["frames"] as? [[String: Any]] ?? []
+            guard rawFrames.count <= 100 else { throw SelectionExportError.tooManyItems }
+            let frames = try rawFrames.map { frame -> ExportService.ReportFrame in
+                guard
+                    let time = (frame["time"] as? NSNumber)?.doubleValue,
+                    time.isFinite,
+                    time >= 0,
+                    let rawAnnotations = frame["annotations"] as? [[String: Any]],
+                    rawAnnotations.count <= 1_000
+                else { throw SelectionExportError.invalidItem }
+                return ExportService.ReportFrame(
+                    title: String((frame["title"] as? String ?? "Image annotée").prefix(500)),
+                    timecode: String((frame["timecode"] as? String ?? "").prefix(100)),
+                    time: time,
+                    annotations: rawAnnotations
+                )
+            }
+            return ExportService.Report(name: name, format: format, model: model, frames: frames)
+        }
+    }
+
+    private static func comparisonFrame(from raw: [String: Any]) throws -> ExportService.ComparisonFrame {
+        guard
+            let time = (raw["time"] as? NSNumber)?.doubleValue,
+            time.isFinite,
+            time >= 0,
+            let annotations = raw["annotations"] as? [[String: Any]],
+            annotations.count <= 1_000
+        else { throw SelectionExportError.invalidItem }
+        return ExportService.ComparisonFrame(
+            title: String((raw["title"] as? String ?? "Image").prefix(500)),
+            timecode: String((raw["timecode"] as? String ?? "").prefix(100)),
+            time: time,
+            annotations: annotations
+        )
     }
 
     private static func validatedImportedState(_ rawState: [String: Any]) -> [String: Any]? {
@@ -915,6 +1126,7 @@ final class NativeBridge: NSObject, WKScriptMessageHandler {
         let projects = (dictionary["projects"] as? [[String: Any]] ?? []).prefix(500).map { project in
             var safeProject = project
             safeProject["poster"] = Self.safePosterPath(project["poster"] as? String)
+            safeProject["cover"] = Self.safeCover(project["cover"] as? [String: Any], legacyPoster: project["poster"] as? String)
             safeProject.removeValue(forKey: "mediaURL")
             safeProject.removeValue(forKey: "mediaMissing")
 
@@ -978,6 +1190,32 @@ final class NativeBridge: NSObject, WKScriptMessageHandler {
         return value
     }
 
+    private static func safeCover(_ value: [String: Any]?, legacyPoster: String?) -> [String: Any] {
+        if value?["mode"] as? String == "text" {
+            let text = String((value?["text"] as? String ?? "").trimmingCharacters(in: .whitespacesAndNewlines).prefix(120))
+            return ["mode": "text", "text": text]
+        }
+        if value?["mode"] as? String == "logo" { return ["mode": "logo"] }
+        if value?["mode"] as? String == "image", let raw = value?["value"] as? String {
+            let source = value?["source"] as? String ?? "local"
+            if source == "bundled", safePosterPath(raw) == raw {
+                return ["mode": "image", "source": "bundled", "value": raw]
+            }
+            if raw.utf8.count <= 1_500_000,
+               raw.hasPrefix("data:image/jpeg;base64,"),
+               let comma = raw.firstIndex(of: ","),
+               let data = Data(base64Encoded: String(raw[raw.index(after: comma)...])),
+               data.count <= CoverService.maximumEncodedBytes {
+                let safeSource = ["local", "frame", "tmdb"].contains(source) ? source : "local"
+                return ["mode": "image", "source": safeSource, "value": raw]
+            }
+        }
+        if let legacyPoster, safePosterPath(legacyPoster) == legacyPoster {
+            return ["mode": "image", "source": "bundled", "value": legacyPoster]
+        }
+        return ["mode": "logo"]
+    }
+
     private static func safeExportFileName(_ value: String?) -> String? {
         guard let value, !value.isEmpty, value.utf8.count <= 512 else { return nil }
         let cleaned = value
@@ -1002,9 +1240,7 @@ final class NativeBridge: NSObject, WKScriptMessageHandler {
     }
 
     private static let allowedLanguages: Set<String> = ["fr-FR", "en-US", "es-ES", "de-DE", "it-IT"]
-    private static let videoExtensions: Set<String> = [
-        "mov", "mp4", "m4v", "mkv", "avi", "webm", "mpg", "mpeg", "ts", "m2ts"
-    ]
+    private static let videoExtensions = MediaFormatPolicy.videoExtensions
     private static let subtitleExtensions: Set<String> = ["srt", "vtt", "ass", "ssa"]
 
     private enum FileValidationError: LocalizedError {
@@ -1084,5 +1320,9 @@ final class NativeBridge: NSObject, WKScriptMessageHandler {
 
     private static let subtitleTypes: [UTType] = {
         subtitleExtensions.compactMap { UTType(filenameExtension: $0) }
+    }()
+
+    private static let coverImageTypes: [UTType] = {
+        CoverService.supportedExtensions.compactMap { UTType(filenameExtension: $0) }
     }()
 }

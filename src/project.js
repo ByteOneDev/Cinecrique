@@ -1,4 +1,9 @@
 import { migrateMarkers } from "./markers.js";
+import { normalizeShortcuts, normalizeTransport } from "./transport.js";
+import { normalizeTimecodeSettings } from "./timecode.js";
+import { normalizeComparison } from "./comparison.js";
+import { migrateAnnotationTimes } from "./annotations.js";
+import { normalizeProjectCover } from "./covers.js";
 
 export function migrateDocument(document, frameRate = 24) {
   if (!document) return document;
@@ -10,6 +15,9 @@ export function migrateDocument(document, frameRate = 24) {
   const tolerance = 0.5 / Math.max(Number(frameRate) || 24, 1);
 
   for (const marker of markers) {
+    if (Object.hasOwn(annotationsByMarker, marker.id)) {
+      annotationsByMarker[marker.id] = migrateAnnotationTimes(annotationsByMarker[marker.id], marker.time);
+    }
     if (marker.title !== "Annotation d’image") continue;
     const annotations = annotationsByMarker[marker.id] || [];
     if (!annotations.length) continue;
@@ -32,6 +40,8 @@ export function migrateDocument(document, frameRate = 24) {
     markers: markers.filter((marker) => !removedIds.has(marker.id)),
     annotationsByMarker,
     selectedMarkerId,
+    transport: normalizeTransport(document.transport),
+    comparison: normalizeComparison(document.comparison),
   };
 }
 
@@ -62,7 +72,9 @@ export function migratePersistedState(state, frameRateForProject = () => 24) {
       title: String(project.title || "Projet sans titre").slice(0, 500),
       detail: String(project.detail || "Analyse locale").slice(0, 500),
       poster: String(project.poster || "./assets/poster-coast.png"),
+      cover: normalizeProjectCover(project.cover, project.poster),
       archived: Boolean(project.archived),
+      timecode: normalizeTimecodeSettings(project.timecode, frameRateForProject(project)),
     };
   });
 
@@ -79,15 +91,15 @@ export function migratePersistedState(state, frameRateForProject = () => 24) {
   const rawPanel = Number(state.preferences?.leftPanel);
 
   return {
-    version: 5,
+    version: 6,
     projects,
     activeProjectId,
     documents,
     preferences: {
       leftPanel: Number.isFinite(rawPanel) ? Math.min(Math.max(rawPanel, 43), 67) : 57,
-      format: state.preferences?.format === "Markdown" ? "Markdown" : "Fountain",
       projectRailCollapsed: Boolean(state.preferences?.projectRailCollapsed),
       muted: Boolean(state.preferences?.muted),
+      shortcuts: normalizeShortcuts(state.preferences?.shortcuts),
     },
   };
 }

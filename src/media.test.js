@@ -1,7 +1,24 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { isMuteShortcut, parseSubtitles, subtitleAt } from "./media.js";
+import {
+  filterSubtitles,
+  isMuteShortcut,
+  parseSubtitles,
+  subtitleAt,
+  subtitleIndexAt,
+  subtitleNoteDraft,
+  isSupportedVideoFile,
+  mediaPlaybackIssue,
+} from "./media.js";
+
+test("recognizes common and professional video containers", () => {
+  assert.equal(isSupportedVideoFile({ name: "film.MKV", type: "" }), true);
+  assert.equal(isSupportedVideoFile({ name: "rushes.mxf", type: "application/octet-stream" }), true);
+  assert.equal(isSupportedVideoFile({ name: "archive.vob", type: "" }), true);
+  assert.equal(isSupportedVideoFile({ name: "notes.pdf", type: "application/pdf" }), false);
+  assert.match(mediaPlaybackIssue({ streams: [{ codec_type: "video", codec_name: "vp9" }] }, "film.mkv"), /VP9/);
+});
 
 test("parses SRT cues with millisecond commas", () => {
   const cues = parseSubtitles(
@@ -40,4 +57,22 @@ test("uses M for mute except while editing text or using modifiers", () => {
   assert.equal(isMuteShortcut({ key: "M", target: { tagName: "TEXTAREA" } }), false);
   assert.equal(isMuteShortcut({ key: "m", metaKey: true, target: { tagName: "DIV" } }), false);
   assert.equal(isMuteShortcut({ key: "x", target: { tagName: "DIV" } }), false);
+});
+
+test("finds and filters synchronized dialogue cues", () => {
+  const cues = [
+    { start: 1, end: 2, text: "Bonjour Camille" },
+    { start: 3, end: 4, text: "La mer est calme" },
+  ];
+  assert.equal(subtitleIndexAt(cues, 1.5), 0);
+  assert.equal(subtitleIndexAt(cues, 2.5), -1);
+  assert.deepEqual(filterSubtitles(cues, "mer").map(({ index }) => index), [1]);
+});
+
+test("prepares a timecoded note from a subtitle cue", () => {
+  const draft = subtitleNoteDraft({ start: 2, end: 4, text: "Une phrase\nsur deux lignes" }, (time) => `TC-${time}`);
+  assert.equal(draft.title, "Une phrase");
+  assert.equal(draft.body, "Une phrase\nsur deux lignes");
+  assert.equal(draft.tag, "Dialogue");
+  assert.equal(draft.startTimecode, "TC-2");
 });

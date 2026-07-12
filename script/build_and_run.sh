@@ -6,9 +6,24 @@ APP_NAME="Cinécrique"
 EXECUTABLE_NAME="Cinecrique"
 BUNDLE_ID="app.analyse.local"
 
+case "$MODE" in
+  --build|build)
+    DEFAULT_CONFIGURATION="release"
+    ;;
+  *)
+    DEFAULT_CONFIGURATION="debug"
+    ;;
+esac
+BUILD_CONFIGURATION="${CINECRIQUE_BUILD_CONFIGURATION:-$DEFAULT_CONFIGURATION}"
+[[ "$BUILD_CONFIGURATION" == "debug" || "$BUILD_CONFIGURATION" == "release" ]] || {
+  echo "invalid Swift build configuration: $BUILD_CONFIGURATION" >&2
+  exit 2
+}
+
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd -P)"
 OUTPUT_APP="$ROOT_DIR/dist/$APP_NAME.app"
 OUTPUT_ARCHIVE="$ROOT_DIR/dist/$APP_NAME.zip"
+SIGN_IDENTITY="${CINECRIQUE_SIGN_IDENTITY:--}"
 TEMP_BASE_INPUT="${TMPDIR:-/private/tmp}"
 if [[ ! -d "$TEMP_BASE_INPUT" || -L "$TEMP_BASE_INPUT" || ! -O "$TEMP_BASE_INPUT" ]]; then
   echo "unsafe temporary directory: $TEMP_BASE_INPUT" >&2
@@ -27,7 +42,7 @@ export COPYFILE_DISABLE=1
 export CLANG_MODULE_CACHE_PATH="$ROOT_DIR/.build/ModuleCache"
 export SWIFTPM_MODULECACHE_OVERRIDE="$ROOT_DIR/.build/ModuleCache"
 
-SWIFT_PACKAGE_ARGS=(--scratch-path "$ROOT_DIR/.build")
+SWIFT_PACKAGE_ARGS=(--scratch-path "$ROOT_DIR/.build" --configuration "$BUILD_CONFIGURATION")
 if [[ "${CINECRIQUE_DISABLE_SWIFTPM_SANDBOX:-0}" == "1" ]]; then
   SWIFT_PACKAGE_ARGS+=(--disable-sandbox)
 fi
@@ -91,10 +106,17 @@ find "$APP_RESOURCES/WebApp" -name .DS_Store -delete
 [[ -f "$APP_RESOURCES/WebApp/index.html" ]] || { echo "missing bundled web app" >&2; exit 1; }
 
 xattr -cr "$APP_BUNDLE"
-/usr/bin/codesign --force --deep --options runtime --sign - --timestamp=none "$APP_BUNDLE"
+if [[ "$SIGN_IDENTITY" == "-" ]]; then
+  /usr/bin/codesign --force --deep --options runtime --sign - --timestamp=none "$APP_BUNDLE"
+else
+  /usr/bin/codesign --force --deep --options runtime --sign "$SIGN_IDENTITY" --timestamp "$APP_BUNDLE"
+fi
 xattr -cr "$APP_BUNDLE"
 /usr/bin/codesign --verify --deep --strict "$APP_BUNDLE"
 mkdir -p "$(dirname "$OUTPUT_APP")"
+/usr/bin/ditto --norsrc "$APP_BUNDLE" "$OUTPUT_APP"
+# Desktop file providers may add Finder metadata to the working copy in dist.
+# Build release archives from the clean, verified runtime bundle instead.
 /usr/bin/ditto -c -k --keepParent --norsrc "$APP_BUNDLE" "$OUTPUT_ARCHIVE"
 
 PACKAGE_CHECK_ROOT="$RUNTIME_ROOT/package-check"

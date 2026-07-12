@@ -21,7 +21,7 @@
   <key>CFBundlePackageType</key>
   <string>APPL</string>
   <key>CFBundleShortVersionString</key>
-  <string>0.1.0</string>
+  <string>1.0.0</string>
   <key>CFBundleVersion</key>
   <string>1</string>
   <key>LSMinimumSystemVersion</key>
@@ -57,6 +57,15 @@
       <array>
         <string>public.movie</string>
         <string>public.audiovisual-content</string>
+      </array>
+      <key>CFBundleTypeExtensions</key>
+      <array>
+        <string>mov</string><string>qt</string><string>mp4</string><string>m4v</string><string>f4v</string>
+        <string>mkv</string><string>webm</string><string>avi</string><string>divx</string>
+        <string>mpg</string><string>mpeg</string><string>m1v</string><string>m2v</string><string>vob</string>
+        <string>ts</string><string>mts</string><string>m2ts</string><string>mxf</string>
+        <string>3gp</string><string>3g2</string><string>ogv</string><string>ogg</string>
+        <string>wmv</string><string>asf</string><string>flv</string>
       </array>
     </dict>
     <dict>
