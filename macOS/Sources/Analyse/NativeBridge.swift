@@ -13,14 +13,35 @@ final class NativeBridge: NSObject, WKScriptMessageHandler {
     private let credentialStore = CredentialStore()
     private let tmdbService = TMDBService()
     private let workQueue = DispatchQueue(label: "app.analyse.native-bridge", qos: .userInitiated)
+    private let mediaProxyService: MediaProxyService?
+    private let mediaProxyInitializationError: String?
 
     override init() {
+        let loadedStore: AppStateStore?
+        let storeError: String?
         do {
-            stateStore = try AppStateStore()
-            stateStoreInitializationError = nil
+            loadedStore = try AppStateStore()
+            storeError = nil
         } catch {
-            stateStore = nil
-            stateStoreInitializationError = error.localizedDescription
+            loadedStore = nil
+            storeError = error.localizedDescription
+        }
+        stateStore = loadedStore
+        stateStoreInitializationError = storeError
+
+        if let supportPath = loadedStore?.directoryPath {
+            do {
+                mediaProxyService = try MediaProxyService(
+                    applicationSupportDirectory: URL(fileURLWithPath: supportPath, isDirectory: true)
+                )
+                mediaProxyInitializationError = nil
+            } catch {
+                mediaProxyService = nil
+                mediaProxyInitializationError = error.localizedDescription
+            }
+        } else {
+            mediaProxyService = nil
+            mediaProxyInitializationError = storeError
         }
         super.init()
     }
@@ -108,6 +129,17 @@ final class NativeBridge: NSObject, WKScriptMessageHandler {
         switch command {
         case "openVideo":
             chooseVideo(identifier: identifier)
+        case "prepareExistingVideo":
+            prepareExistingVideo(payload: payload, identifier: identifier)
+        case "cancelMediaPreparation":
+            guard let operationID = payload["operationId"] as? String, operationID.utf8.count <= 128 else {
+                respond(identifier: identifier, error: "Opération média invalide.")
+                return
+            }
+            let cancelled = mediaProxyService?.cancel(operationID: operationID) ?? false
+            respond(identifier: identifier, result: ["cancelled": cancelled])
+        case "clearMediaProxy":
+            clearMediaProxy(payload: payload, identifier: identifier)
         case "openSubtitle":
             chooseSubtitle(identifier: identifier)
         case "inspectMetadata":
@@ -188,6 +220,8 @@ final class NativeBridge: NSObject, WKScriptMessageHandler {
                 "platform": "macOS",
                 "native": true,
                 "ffprobeAvailable": FFprobeService.executableURL != nil,
+                "ffmpegAvailable": MediaToolLocator.executableURL(named: "ffmpeg") != nil,
+                "mediaProxyAvailable": mediaProxyService?.available == true,
                 "applicationSupport": stateStore?.directoryPath ?? ""
             ])
         case "frontendReady":
@@ -278,7 +312,7 @@ final class NativeBridge: NSObject, WKScriptMessageHandler {
                 return
             }
 
-            self?.prepareVideo(url) { result in
+            self?.prepareVideo(url, operationID: identifier) { result in
                 self?.respond(identifier: identifier, result: result)
             }
         }
@@ -372,27 +406,222 @@ final class NativeBridge: NSObject, WKScriptMessageHandler {
         }
     }
 
-    private func prepareVideo(_ url: URL, completion: @escaping ([String: Any]) -> Void) {
-        workQueue.async {
+    private func prepareExistingVideo(payload: [String: Any], identifier: String) {
+        guard
+            let path = payload["path"] as? String,
+            path.utf8.count <= 16_384
+        else {
+            respond(identifier: identifier, error: "Chemin vidéo manquant.")
+            return
+        }
+        let candidate = MediaAccessRegistry.normalizedURL(URL(fileURLWithPath: path))
+        guard MediaAccessRegistry.shared.isApproved(candidate) else {
+            respond(identifier: identifier, error: "Ce média n’a pas été autorisé.")
+            return
+        }
+        prepareVideo(
+            candidate,
+            operationID: identifier,
+            forceProxy: (payload["forceProxy"] as? Bool) ?? false
+        ) { [weak self] result in
+            self?.respond(identifier: identifier, result: result)
+        }
+    }
+
+    private func clearMediaProxy(payload: [String: Any], identifier: String) {
+        guard
+            let path = payload["path"] as? String,
+            path.utf8.count <= 16_384
+        else {
+            respond(identifier: identifier, error: "Chemin vidéo manquant.")
+            return
+        }
+        let candidate = MediaAccessRegistry.normalizedURL(URL(fileURLWithPath: path))
+        guard MediaAccessRegistry.shared.isApproved(candidate) else {
+            respond(identifier: identifier, error: "Ce média n’a pas été autorisé.")
+            return
+        }
+        workQueue.async { [weak self] in
+            do {
+                let safeURL = try Self.validatedVideoURL(candidate)
+                guard let service = self?.mediaProxyService else {
+                    throw MediaProxyService.ProxyError.failed(
+                        self?.mediaProxyInitializationError ?? "Le cache média local est indisponible."
+                    )
+                }
+                try service.removeCachedProxy(for: safeURL)
+                self?.respond(identifier: identifier, result: ["removed": true])
+            } catch {
+                self?.respond(identifier: identifier, error: error.localizedDescription)
+            }
+        }
+    }
+
+    private func prepareVideo(
+        _ url: URL,
+        operationID: String = UUID().uuidString,
+        forceProxy: Bool = false,
+        completion: @escaping ([String: Any]) -> Void
+    ) {
+        workQueue.async { [weak self] in
+            guard let self else { return }
+            defer { self.mediaProxyService?.finish(operationID: operationID) }
             do {
                 let safeURL = try Self.validatedVideoURL(url)
                 MediaAccessRegistry.shared.approve(safeURL)
-                var result: [String: Any] = [
-                    "cancelled": false,
-                    "name": safeURL.lastPathComponent,
-                    "path": safeURL.path,
-                    "mediaURL": Self.mediaURL(for: safeURL)
-                ]
+                self.emitMediaPreparation(
+                    operationID: operationID,
+                    name: safeURL.lastPathComponent,
+                    progress: MediaProxyService.Progress(
+                        stage: "inspection",
+                        fraction: 0.01,
+                        message: "Analyse du média local",
+                        cancellable: true
+                    )
+                )
+
+                let metadata: [String: Any]?
+                let metadataError: String?
                 do {
-                    result["metadata"] = try FFprobeService.inspect(safeURL)
+                    metadata = try FFprobeService.inspect(safeURL)
+                    metadataError = nil
                 } catch {
-                    result["metadataError"] = error.localizedDescription
+                    metadata = nil
+                    metadataError = error.localizedDescription
                 }
-                completion(result)
+
+                let containerNeedsProxy = forceProxy
+                    || !MediaProxyPolicy.directContainers.contains(safeURL.pathExtension.lowercased())
+                if containerNeedsProxy && metadata == nil {
+                    throw MediaProxyService.ProxyError.failed(
+                        metadataError ?? "Les pistes du média ne peuvent pas être analysées."
+                    )
+                }
+
+                let prepared: MediaProxyService.PreparedMedia
+                if let metadata {
+                    guard let service = self.mediaProxyService else {
+                        if containerNeedsProxy {
+                            throw MediaProxyService.ProxyError.failed(
+                                self.mediaProxyInitializationError ?? "Le moteur de proxy local est indisponible."
+                            )
+                        }
+                        prepared = MediaProxyService.PreparedMedia(
+                            playbackURL: safeURL,
+                            proxyUsed: false,
+                            mode: nil,
+                            reused: false,
+                            subtitle: nil
+                        )
+                        return self.completeVideoPreparation(
+                            originalURL: safeURL,
+                            metadata: metadata,
+                            metadataError: metadataError,
+                            prepared: prepared,
+                            operationID: operationID,
+                            completion: completion
+                        )
+                    }
+                    prepared = try service.prepare(
+                        originalURL: safeURL,
+                        metadata: metadata,
+                        operationID: operationID,
+                        forceProxy: forceProxy
+                    ) { [weak self] progress in
+                        self?.emitMediaPreparation(
+                            operationID: operationID,
+                            name: safeURL.lastPathComponent,
+                            progress: progress
+                        )
+                    }
+                } else {
+                    prepared = MediaProxyService.PreparedMedia(
+                        playbackURL: safeURL,
+                        proxyUsed: false,
+                        mode: nil,
+                        reused: false,
+                        subtitle: nil
+                    )
+                }
+
+                self.completeVideoPreparation(
+                    originalURL: safeURL,
+                    metadata: metadata,
+                    metadataError: metadataError,
+                    prepared: prepared,
+                    operationID: operationID,
+                    completion: completion
+                )
+            } catch MediaProxyService.ProxyError.cancelled {
+                self.emitEvent(named: "analyse:media-preparation", detail: [
+                    "operationId": operationID,
+                    "stage": "cancelled",
+                    "progress": 0,
+                    "message": "Préparation annulée",
+                    "cancellable": false,
+                ])
+                completion(["cancelled": true, "operationId": operationID])
             } catch {
-                completion(["cancelled": false, "error": error.localizedDescription])
+                self.emitEvent(named: "analyse:media-preparation", detail: [
+                    "operationId": operationID,
+                    "stage": "failed",
+                    "progress": 0,
+                    "message": error.localizedDescription,
+                    "cancellable": false,
+                ])
+                completion(["cancelled": false, "error": error.localizedDescription, "operationId": operationID])
             }
         }
+    }
+
+    private func completeVideoPreparation(
+        originalURL: URL,
+        metadata: [String: Any]?,
+        metadataError: String?,
+        prepared: MediaProxyService.PreparedMedia,
+        operationID: String,
+        completion: @escaping ([String: Any]) -> Void
+    ) {
+        MediaAccessRegistry.shared.approve(prepared.playbackURL)
+        var result: [String: Any] = [
+            "cancelled": false,
+            "operationId": operationID,
+            "name": originalURL.lastPathComponent,
+            "path": originalURL.path,
+            "playbackPath": prepared.playbackURL.path,
+            "mediaURL": Self.mediaURL(for: prepared.playbackURL),
+            "proxyUsed": prepared.proxyUsed,
+            "proxyReused": prepared.reused,
+        ]
+        if let mode = prepared.mode { result["proxyMode"] = mode.rawValue }
+        if let metadata { result["metadata"] = metadata }
+        if let metadataError { result["metadataError"] = metadataError }
+        if let subtitle = prepared.subtitle {
+            result["subtitle"] = ["name": subtitle.name, "content": subtitle.content]
+        }
+        emitEvent(named: "analyse:media-preparation", detail: [
+            "operationId": operationID,
+            "stage": "complete",
+            "progress": 1,
+            "message": prepared.proxyUsed ? "Proxy compatible prêt" : "Média prêt",
+            "cancellable": false,
+        ])
+        completion(result)
+    }
+
+    private func emitMediaPreparation(
+        operationID: String,
+        name: String,
+        progress: MediaProxyService.Progress
+    ) {
+        emitEvent(named: "analyse:media-preparation", detail: [
+            "operationId": operationID,
+            "name": String(name.prefix(500)),
+            "stage": progress.stage,
+            "progress": min(max(progress.fraction, 0), 1),
+            "message": String(progress.message.prefix(1_000)),
+            "cancellable": progress.cancellable,
+        ])
     }
 
     private func prepareSubtitle(_ url: URL, completion: @escaping ([String: Any]) -> Void) {
@@ -465,7 +694,7 @@ final class NativeBridge: NSObject, WKScriptMessageHandler {
         return [
             "cancelled": false,
             "name": safeURL.lastPathComponent,
-            "state": result.state,
+            "state": restoreMediaRuntime(in: result.state) ?? result.state,
             "recovered": result.version < 6,
             "portable": result.portable,
         ]
@@ -635,7 +864,7 @@ final class NativeBridge: NSObject, WKScriptMessageHandler {
             }
             do {
                 let loadedState = try stateStore.load()
-                var state = Self.sanitizedPersistedState(loadedState)
+                var state = self.restoreMediaRuntime(in: Self.sanitizedPersistedState(loadedState))
                 if stateStore.recoveredFromSnapshot {
                     state?["_recoveredFromSnapshot"] = true
                 }
@@ -748,20 +977,29 @@ final class NativeBridge: NSObject, WKScriptMessageHandler {
             }
 
             let includeVideo = (payload["includeVideo"] as? Bool) ?? false
-            let needsMedia = includeVideo
-                || !frames.isEmpty
+            let needsOriginalMedia = includeVideo || projectPackage?.includeVideo == true
+            let needsRenderMedia = !frames.isEmpty
                 || reports.contains(where: { !$0.frames.isEmpty })
-                || projectPackage?.includeVideo == true
                 || !(projectPackage?.frames.isEmpty ?? true)
-            var mediaURL: URL?
-            if needsMedia {
+            var originalMediaURL: URL?
+            if needsOriginalMedia {
                 guard
-                    let path = payload["mediaPath"] as? String,
+                    let path = payload["originalMediaPath"] as? String,
                     path.utf8.count <= 16_384
                 else { throw SelectionExportError.missingMedia }
                 let candidate = MediaAccessRegistry.normalizedURL(URL(fileURLWithPath: path))
                 guard MediaAccessRegistry.shared.isApproved(candidate) else { throw SelectionExportError.missingMedia }
-                mediaURL = try Self.validatedVideoURL(candidate)
+                originalMediaURL = try Self.validatedVideoURL(candidate)
+            }
+            var renderMediaURL: URL?
+            if needsRenderMedia {
+                guard
+                    let path = payload["renderMediaPath"] as? String,
+                    path.utf8.count <= 16_384
+                else { throw SelectionExportError.missingMedia }
+                let candidate = MediaAccessRegistry.normalizedURL(URL(fileURLWithPath: path))
+                guard MediaAccessRegistry.shared.isApproved(candidate) else { throw SelectionExportError.missingMedia }
+                renderMediaURL = try Self.validatedVideoURL(candidate)
             }
 
             let itemCount = textFiles.count + (includeVideo ? 1 : 0) + frames.count + reports.count + (projectPackage == nil ? 0 : 1)
@@ -778,9 +1016,9 @@ final class NativeBridge: NSObject, WKScriptMessageHandler {
                 } else if let file = textFiles.first {
                     panel.nameFieldStringValue = file.name
                     panel.allowedContentTypes = [UTType(filenameExtension: URL(fileURLWithPath: file.name).pathExtension) ?? .data]
-                } else if includeVideo, let mediaURL {
-                    panel.nameFieldStringValue = mediaURL.lastPathComponent
-                    panel.allowedContentTypes = [UTType(filenameExtension: mediaURL.pathExtension) ?? .movie]
+                } else if includeVideo, let originalMediaURL {
+                    panel.nameFieldStringValue = originalMediaURL.lastPathComponent
+                    panel.allowedContentTypes = [UTType(filenameExtension: originalMediaURL.pathExtension) ?? .movie]
                 } else if let frame = frames.first {
                     panel.nameFieldStringValue = frame.name
                     panel.allowedContentTypes = [.png]
@@ -803,7 +1041,8 @@ final class NativeBridge: NSObject, WKScriptMessageHandler {
                             try ExportService.writeArchive(
                                 named: baseName,
                                 textFiles: textFiles,
-                                mediaURL: mediaURL,
+                                originalMediaURL: originalMediaURL,
+                                renderMediaURL: renderMediaURL,
                                 includeVideo: includeVideo,
                                 frames: frames,
                                 reports: reports,
@@ -812,17 +1051,18 @@ final class NativeBridge: NSObject, WKScriptMessageHandler {
                             )
                         } else if let file = textFiles.first {
                             try ExportService.writeSingleText(file, to: destination)
-                        } else if includeVideo, let mediaURL {
-                            try ExportService.copyVideo(from: mediaURL, to: destination)
-                        } else if let frame = frames.first, let mediaURL {
-                            try ExportService.writeFrame(frame, mediaURL: mediaURL, to: destination)
+                        } else if includeVideo, let originalMediaURL {
+                            try ExportService.copyVideo(from: originalMediaURL, to: destination)
+                        } else if let frame = frames.first, let renderMediaURL {
+                            try ExportService.writeFrame(frame, mediaURL: renderMediaURL, to: destination)
                         } else if let report = reports.first {
-                            try ExportService.writeReport(report, mediaURL: mediaURL, to: destination)
+                            try ExportService.writeReport(report, mediaURL: renderMediaURL, to: destination)
                         } else if let projectPackage {
                             try ExportService.writeProjectPackage(
                                 projectPackage,
                                 named: baseName,
-                                mediaURL: mediaURL,
+                                originalMediaURL: originalMediaURL,
+                                renderMediaURL: renderMediaURL,
                                 to: destination
                             )
                         }
@@ -1129,6 +1369,10 @@ final class NativeBridge: NSObject, WKScriptMessageHandler {
             safeProject["cover"] = Self.safeCover(project["cover"] as? [String: Any], legacyPoster: project["poster"] as? String)
             safeProject.removeValue(forKey: "mediaURL")
             safeProject.removeValue(forKey: "mediaMissing")
+            safeProject.removeValue(forKey: "playbackPath")
+            safeProject.removeValue(forKey: "proxyMissing")
+            safeProject.removeValue(forKey: "proxyUsed")
+            safeProject.removeValue(forKey: "proxyMode")
 
             guard
                 let path = project["path"] as? String,
@@ -1149,11 +1393,51 @@ final class NativeBridge: NSObject, WKScriptMessageHandler {
 
             MediaAccessRegistry.shared.approve(safeURL)
             safeProject["path"] = safeURL.path
-            safeProject["mediaURL"] = mediaURL(for: safeURL)
+            if MediaProxyPolicy.directContainers.contains(safeURL.pathExtension.lowercased()) {
+                safeProject["playbackPath"] = safeURL.path
+                safeProject["mediaURL"] = mediaURL(for: safeURL)
+            } else {
+                safeProject["proxyMissing"] = true
+            }
             return safeProject
         }
         dictionary["projects"] = Array(projects)
         return dictionary
+    }
+
+    private func restoreMediaRuntime(in state: [String: Any]?) -> [String: Any]? {
+        guard var state, let projects = state["projects"] as? [[String: Any]] else { return state }
+        state["projects"] = projects.map { project in
+            var runtime = project
+            runtime.removeValue(forKey: "mediaURL")
+            runtime.removeValue(forKey: "mediaMissing")
+            runtime.removeValue(forKey: "playbackPath")
+            runtime.removeValue(forKey: "proxyMissing")
+            runtime.removeValue(forKey: "proxyUsed")
+            guard
+                let path = project["path"] as? String,
+                path.utf8.count <= 16_384,
+                let original = try? Self.validatedVideoURL(URL(fileURLWithPath: path))
+            else {
+                if project["path"] != nil { runtime["mediaMissing"] = true }
+                return runtime
+            }
+
+            MediaAccessRegistry.shared.approve(original)
+            if let proxy = mediaProxyService?.cachedProxy(for: original) {
+                MediaAccessRegistry.shared.approve(proxy)
+                runtime["playbackPath"] = proxy.path
+                runtime["mediaURL"] = Self.mediaURL(for: proxy)
+                runtime["proxyUsed"] = true
+            } else if MediaProxyPolicy.directContainers.contains(original.pathExtension.lowercased()) {
+                runtime["playbackPath"] = original.path
+                runtime["mediaURL"] = Self.mediaURL(for: original)
+            } else {
+                runtime["proxyMissing"] = true
+            }
+            return runtime
+        }
+        return state
     }
 
     private static func validatedVideoURL(_ url: URL) throws -> URL {

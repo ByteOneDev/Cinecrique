@@ -3,14 +3,7 @@ import Darwin
 
 enum FFprobeService {
     static var executableURL: URL? {
-        let candidates = [
-            "/opt/homebrew/bin/ffprobe",
-            "/usr/local/bin/ffprobe",
-            "/opt/local/bin/ffprobe"
-        ]
-        return candidates
-            .map(URL.init(fileURLWithPath:))
-            .first(where: { FileManager.default.isExecutableFile(atPath: $0.path) })
+        MediaToolLocator.executableURL(named: "ffprobe")
     }
 
     static func inspect(_ fileURL: URL) throws -> [String: Any] {
@@ -21,7 +14,6 @@ enum FFprobeService {
         let errors = Pipe()
         process.executableURL = executableURL
         process.arguments = [
-            "-nostdin",
             "-hide_banner",
             "-v", "error",
             "-print_format", "json",
@@ -31,6 +23,7 @@ enum FFprobeService {
         ]
         process.standardOutput = output
         process.standardError = errors
+        process.standardInput = FileHandle.nullDevice
         let termination = DispatchSemaphore(value: 0)
         process.terminationHandler = { _ in termination.signal() }
 
@@ -114,7 +107,7 @@ enum FFprobeService {
         var errorDescription: String? {
             switch self {
             case .notInstalled:
-                return "ffprobe n’est pas installé sur ce Mac."
+                return "Le moteur média ffprobe de Cinécrique est indisponible."
             case .failed(let message):
                 return message
             case .invalidOutput:

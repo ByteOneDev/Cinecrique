@@ -141,6 +141,38 @@ do {
     try expect(MediaFormatPolicy.acceptsVideoExtension("vob"), "accept legacy DVD video containers")
     try expect(!MediaFormatPolicy.acceptsVideoExtension("exe"), "reject non-video extensions")
 
+    let mkvRemux = MediaProxyPolicy.decision(
+        fileExtension: "mkv",
+        videoCodec: "h264",
+        audioCodecs: ["aac"]
+    )
+    try expect(mkvRemux.requiresProxy && mkvRemux.mode == .remux, "remux compatible MKV streams")
+    let mkvAudioProxy = MediaProxyPolicy.decision(
+        fileExtension: "mkv",
+        videoCodec: "hevc",
+        audioCodecs: ["dts"]
+    )
+    try expect(mkvAudioProxy.mode == .transcodeAudio, "transcode only incompatible MKV audio")
+    let mkvVideoProxy = MediaProxyPolicy.decision(
+        fileExtension: "mkv",
+        videoCodec: "vp9",
+        audioCodecs: ["opus"]
+    )
+    try expect(mkvVideoProxy.mode == .transcodeVideo, "transcode incompatible MKV video")
+    let nativeMP4 = MediaProxyPolicy.decision(
+        fileExtension: "mp4",
+        videoCodec: "h264",
+        audioCodecs: ["aac"]
+    )
+    try expect(!nativeMP4.requiresProxy, "keep compatible MP4 direct")
+    let forcedMP4 = MediaProxyPolicy.decision(
+        fileExtension: "mp4",
+        videoCodec: "h264",
+        audioCodecs: ["aac"],
+        forceProxy: true
+    )
+    try expect(forcedMP4.requiresProxy && forcedMP4.mode == .remux, "allow forced compatibility proxy")
+
     let reportHTML = ReportHTMLBuilder.build(model: [
         "title": "Film <script>alert(1)</script>",
         "projectInfo": [["label": "Cadence", "value": "24 i/s"]],
@@ -191,7 +223,7 @@ do {
     let prunedSnapshots = try fileManager.contentsOfDirectory(at: snapshotsDirectory, includingPropertiesForKeys: nil)
     try expect(prunedSnapshots.count == 10, "snapshot cap remains stable after recovery")
 
-    print("AnalyseCoreChecks: 40 checks passed")
+    print("AnalyseCoreChecks: 45 checks passed")
 } catch {
     fputs("AnalyseCoreChecks failed: \(error)\n", stderr)
     exit(1)

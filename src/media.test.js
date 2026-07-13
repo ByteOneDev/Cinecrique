@@ -10,6 +10,8 @@ import {
   subtitleNoteDraft,
   isSupportedVideoFile,
   mediaPlaybackIssue,
+  mediaRenderPath,
+  withoutMediaRuntime,
 } from "./media.js";
 
 test("recognizes common and professional video containers", () => {
@@ -17,7 +19,24 @@ test("recognizes common and professional video containers", () => {
   assert.equal(isSupportedVideoFile({ name: "rushes.mxf", type: "application/octet-stream" }), true);
   assert.equal(isSupportedVideoFile({ name: "archive.vob", type: "" }), true);
   assert.equal(isSupportedVideoFile({ name: "notes.pdf", type: "application/pdf" }), false);
-  assert.match(mediaPlaybackIssue({ streams: [{ codec_type: "video", codec_name: "vp9" }] }, "film.mkv"), /VP9/);
+  assert.match(mediaPlaybackIssue({ streams: [{ codec_type: "video", codec_name: "vp9" }] }, "film.mkv"), /conteneur MKV doit être préparé/);
+});
+
+test("distinguishes an unsupported container from an unsupported codec", () => {
+  assert.match(mediaPlaybackIssue({ streams: [{ codec_type: "video", codec_name: "prores" }] }, "film.mov"), /codec PRORES/);
+});
+
+test("keeps proxy paths at runtime but strips them from persisted projects", () => {
+  const project = {
+    id: "film",
+    path: "/Films/source.mkv",
+    playbackPath: "/Cache/playback.mp4",
+    mediaURL: "analyse-media://local",
+    proxyUsed: true,
+    proxyMode: "remux",
+  };
+  assert.equal(mediaRenderPath(project), "/Cache/playback.mp4");
+  assert.deepEqual(withoutMediaRuntime(project), { id: "film", path: "/Films/source.mkv" });
 });
 
 test("parses SRT cues with millisecond commas", () => {

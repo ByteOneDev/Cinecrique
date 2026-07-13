@@ -14,6 +14,8 @@ export const VIDEO_EXTENSIONS = Object.freeze([
   "3gp", "3g2", "ogv", "ogg", "wmv", "asf", "flv",
 ]);
 
+export const DIRECT_MEDIA_EXTENSIONS = Object.freeze(["mov", "qt", "mp4", "m4v", "f4v"]);
+
 export function isSupportedVideoFile(file) {
   const extension = String(file?.name || "").split(".").pop()?.toLocaleLowerCase("fr") || "";
   return Boolean(file?.type?.startsWith("video/") || VIDEO_EXTENSIONS.includes(extension));
@@ -22,8 +24,30 @@ export function isSupportedVideoFile(file) {
 export function mediaPlaybackIssue(metadata, fileName = "") {
   const video = metadata?.streams?.find((stream) => stream.codec_type === "video");
   const codec = video?.codec_long_name || video?.codec_name?.toUpperCase() || "de la piste vidéo";
-  const extension = String(fileName || "").split(".").pop()?.toLocaleUpperCase("fr") || "vidéo";
+  const rawExtension = String(fileName || "").split(".").pop()?.toLocaleLowerCase("fr") || "";
+  const extension = rawExtension.toLocaleUpperCase("fr") || "vidéo";
+  if (rawExtension && !DIRECT_MEDIA_EXTENSIONS.includes(rawExtension)) {
+    return `Le conteneur ${extension} doit être préparé dans un proxy local avant sa lecture par WebKit.`;
+  }
   return `Le conteneur ${extension} est reconnu, mais le codec ${codec} n’est pas décodable par WebKit sur ce Mac.`;
+}
+
+export function mediaRenderPath(project) {
+  return String(project?.playbackPath || project?.path || "");
+}
+
+export function withoutMediaRuntime(project) {
+  if (!project || typeof project !== "object") return project;
+  const {
+    mediaURL,
+    mediaMissing,
+    playbackPath,
+    proxyMissing,
+    proxyUsed,
+    proxyMode,
+    ...persisted
+  } = project;
+  return persisted;
 }
 
 function stripAssFormatting(text) {

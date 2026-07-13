@@ -13,6 +13,7 @@ import {
   CaretDown,
   Check,
   Circle,
+  CircleNotch,
   Columns,
   CornersOut,
   DotsThree,
@@ -55,6 +56,7 @@ import {
   VIDEO_EXTENSIONS,
   filterSubtitles,
   isSupportedVideoFile,
+  mediaRenderPath,
   mediaPlaybackIssue,
   metadataDuration,
   metadataFields,
@@ -64,6 +66,7 @@ import {
   subtitleAt,
   subtitleIndexAt,
   subtitleNoteDraft,
+  withoutMediaRuntime,
 } from "./media.js";
 import { isNativeApp, nativeBridge } from "./native.js";
 import {
@@ -1186,6 +1189,7 @@ export function App() {
   const [mediaSource, setMediaSource] = useState("");
   const [mediaPath, setMediaPath] = useState("");
   const [mediaPlaybackError, setMediaPlaybackError] = useState("");
+  const [mediaPreparation, setMediaPreparation] = useState(null);
   const [duration, setDuration] = useState(DURATION);
   const [fileMetadata, setFileMetadata] = useState(null);
   const [timecodeOffsetDraft, setTimecodeOffsetDraft] = useState("00:00:00:00");
@@ -1237,6 +1241,9 @@ export function App() {
   const projectRenameInputRef = useRef(null);
   const coverInitialFocusRef = useRef(null);
   const coverFileInputRef = useRef(null);
+  const mediaPreparationCancelRef = useRef(null);
+  const proxyRecoveryRef = useRef(null);
+  const activeProjectIdRef = useRef(null);
 
   const activeProject = selectedProject >= 0 ? projectList[selectedProject] || null : null;
   const detectedFrameRate = metadataFrameRate(fileMetadata || activeProject?.metadata, FPS);
@@ -1387,7 +1394,7 @@ export function App() {
     const migrated = migratePersistedState(importableState, (project) => metadataFrameRate(project.metadata, FPS));
     const nextProjects = migrated.projects.map((project) => ({
       ...project,
-      mediaMissing: Boolean(project.path && !project.mediaURL),
+      mediaMissing: Boolean(project.mediaMissing || (project.path && !project.mediaURL && !project.proxyMissing)),
     }));
     const nextIndex = migrated.activeProjectId == null
       ? -1
@@ -1398,7 +1405,7 @@ export function App() {
     setSelectedProject(nextIndex);
     applyDocument(nextProject ? migrated.documents[nextProject.id] || emptyDocument() : emptyDocument());
     setMediaSource(nextProject?.mediaURL || "");
-    setMediaPath(nextProject?.path || "");
+    setMediaPath(mediaRenderPath(nextProject));
     setMediaPlaybackError("");
     setFileMetadata(nextProject?.metadata || null);
     setDuration(metadataDuration(nextProject?.metadata, nextProject?.path ? 1 : DURATION));
@@ -1412,6 +1419,8 @@ export function App() {
       setToast("La sauvegarde principale était corrompue. Le dernier snapshot valide a été restauré.");
     } else if (nextProject?.mediaMissing) {
       setToast("Le média de ce projet a été déplacé. Vous pouvez le relier sans perdre l’analyse.");
+    } else if (nextProject?.proxyMissing) {
+      setToast("Le proxy de lecture local va être régénéré.");
     }
     return migrated;
   }, [applyDocument]);
@@ -1663,7 +1672,9 @@ export function App() {
   }, [seekTimelineAtClientX]);
 
   const applyVideoResult = useCallback((result) => {
-    if (!result || result.cancelled) return;
+    if (!result) return;
+    setMediaPreparation((current) => !current || current.operationId === result.operationId ? null : current);
+    if (result.cancelled) return;
     if (result.error) {
       setToast(result.error);
       return;
@@ -1678,8 +1689,12 @@ export function App() {
       poster: "./assets/poster-coast.png",
       cover: { mode: "logo" },
       path: result.path,
+      playbackPath: result.playbackPath || result.path,
       mediaURL: result.mediaURL,
       mediaMissing: false,
+      proxyMissing: false,
+      proxyUsed: Boolean(result.proxyUsed),
+      proxyMode: result.proxyMode || "",
       archived: false,
       metadata: result.metadata || null,
       metadataError: result.metadataError || "",
@@ -1706,12 +1721,20 @@ export function App() {
     setProjectList(nextProjects);
     setSelectedProject(nextIndex);
     applyDocument(nextDocument);
+    if (result.subtitle && !(nextDocument.subtitleCues || []).length) {
+      const cues = parseSubtitles(result.subtitle.content || "", result.subtitle.name || "proxy.vtt");
+      setSubtitleCues(cues);
+      setSubtitleName(result.subtitle.name || "Sous-titres intégrés");
+    }
     setMediaSource(result.mediaURL || "");
-    setMediaPath(result.path);
+    setMediaPath(result.playbackPath || result.path);
     setMediaPlaybackError("");
     setFileMetadata(result.metadata || null);
     setDuration(metadataDuration(result.metadata, 1));
-    setToast(`${result.name} ouvert localement`);
+    const proxyLabel = result.proxyUsed
+      ? result.proxyMode === "remux" ? " · proxy sans perte" : " · proxy compatible"
+      : "";
+    setToast(`${result.name} ouvert localement${proxyLabel}`);
   }, [activeProject?.id, applyDocument, currentDocument, documents, projectList]);
 
   const applySubtitleResult = useCallback((result) => {
@@ -1734,6 +1757,7 @@ export function App() {
     try {
       applyVideoResult(await nativeBridge.call("openVideo"));
     } catch (error) {
+      setMediaPreparation(null);
       setToast(error.message);
     }
   }, [applyVideoResult, nativeMode]);
@@ -1750,17 +1774,117 @@ export function App() {
     }
   }, [applySubtitleResult, nativeMode]);
 
+  const prepareExistingPlayback = useCallback(async ({ forceProxy = false, automatic = false } = {}) => {
+    if (!nativeMode || !activeProject?.id || !activeProject.path || activeProject.mediaMissing) return;
+    try {
+      const result = await nativeBridge.call("prepareExistingVideo", {
+        path: activeProject.path,
+        forceProxy,
+      });
+      setMediaPreparation((current) => !current || current.operationId === result?.operationId ? null : current);
+      if (!result || result.cancelled) return;
+      if (result.error) throw new Error(result.error);
+      const replacement = {
+        ...activeProject,
+        playbackPath: result.playbackPath || result.path,
+        mediaURL: result.mediaURL || "",
+        mediaMissing: false,
+        proxyMissing: false,
+        proxyUsed: Boolean(result.proxyUsed),
+        proxyMode: result.proxyMode || "",
+        metadata: result.metadata || activeProject.metadata || null,
+        metadataError: result.metadataError || "",
+      };
+      setProjectList((current) => current.map((project) => project.id === activeProject.id ? replacement : project));
+      if (activeProjectIdRef.current === activeProject.id) {
+        setMediaSource(replacement.mediaURL);
+        setMediaPath(replacement.playbackPath || replacement.path || "");
+        setMediaPlaybackError("");
+        setFileMetadata(replacement.metadata);
+        setDuration(metadataDuration(replacement.metadata, 1));
+        if (result.subtitle && !subtitleCues.length) applySubtitleResult(result.subtitle);
+        setToast(result.proxyReused ? "Proxy local restauré" : result.proxyMode === "remux" ? "Proxy sans perte créé" : "Proxy compatible créé");
+      }
+    } catch (error) {
+      setMediaPreparation(null);
+      setToast(`${automatic ? "Proxy automatique impossible" : "Préparation impossible"} : ${error.message}`);
+    }
+  }, [activeProject, applySubtitleResult, nativeMode, subtitleCues.length]);
+
+  const cancelMediaPreparation = useCallback(async () => {
+    if (!nativeMode || !mediaPreparation?.operationId || !mediaPreparation.cancellable) return;
+    setMediaPreparation((current) => current ? { ...current, cancelling: true, cancellable: false } : current);
+    try {
+      await nativeBridge.call("cancelMediaPreparation", { operationId: mediaPreparation.operationId });
+    } catch (error) {
+      setToast(`Annulation impossible : ${error.message}`);
+    }
+  }, [mediaPreparation, nativeMode]);
+
+  const removeActiveMediaProxy = useCallback(async () => {
+    if (!nativeMode || !activeProject?.proxyUsed || !activeProject.path) return;
+    pauseTransport();
+    setMediaSource("");
+    setMediaPath("");
+    try {
+      await nativeBridge.call("clearMediaProxy", { path: activeProject.path });
+      setProjectList((current) => current.map((project) => project.id === activeProject.id ? {
+        ...project,
+        playbackPath: "",
+        mediaURL: "",
+        proxyMissing: true,
+        proxyUsed: false,
+        proxyMode: "",
+      } : project));
+      proxyRecoveryRef.current = `${activeProject.id}:${activeProject.path}`;
+      setToast("Proxy supprimé, vidéo originale conservée");
+    } catch (error) {
+      setMediaSource(activeProject.mediaURL || "");
+      setMediaPath(mediaRenderPath(activeProject));
+      setToast(`Suppression impossible : ${error.message}`);
+    }
+  }, [activeProject, nativeMode, pauseTransport]);
+
+  const rebuildActiveMediaProxy = useCallback(async () => {
+    if (!nativeMode || !activeProject?.path || activeProject.mediaMissing) return;
+    pauseTransport();
+    setMediaSource("");
+    setMediaPath("");
+    try {
+      if (activeProject.proxyUsed) {
+        await nativeBridge.call("clearMediaProxy", { path: activeProject.path });
+        proxyRecoveryRef.current = `${activeProject.id}:${activeProject.path}`;
+        setProjectList((current) => current.map((project) => project.id === activeProject.id ? {
+          ...project,
+          playbackPath: "",
+          mediaURL: "",
+          proxyMissing: true,
+          proxyUsed: false,
+          proxyMode: "",
+        } : project));
+      }
+      await prepareExistingPlayback({ forceProxy: true });
+    } catch (error) {
+      setToast(`Reconstruction impossible : ${error.message}`);
+    }
+  }, [activeProject, nativeMode, pauseTransport, prepareExistingPlayback]);
+
   const relinkMedia = useCallback(async () => {
     if (!nativeMode || !activeProject?.id) return;
     try {
       const result = await nativeBridge.call("openVideo");
+      setMediaPreparation((current) => !current || current.operationId === result?.operationId ? null : current);
       if (!result || result.cancelled) return;
       if (result.error) throw new Error(result.error);
       const replacement = {
         ...activeProject,
         path: result.path,
+        playbackPath: result.playbackPath || result.path,
         mediaURL: result.mediaURL,
         mediaMissing: false,
+        proxyMissing: false,
+        proxyUsed: Boolean(result.proxyUsed),
+        proxyMode: result.proxyMode || "",
         metadata: result.metadata || activeProject.metadata || null,
         metadataError: result.metadataError || "",
         timecode: activeProject.timecode?.source === "manual"
@@ -1769,15 +1893,16 @@ export function App() {
       };
       setProjectList((current) => current.map((project) => project.id === activeProject.id ? replacement : project));
       setMediaSource(result.mediaURL || "");
-      setMediaPath(result.path || "");
+      setMediaPath(result.playbackPath || result.path || "");
       setMediaPlaybackError("");
       setFileMetadata(replacement.metadata);
       setDuration(metadataDuration(replacement.metadata, 1));
+      if (result.subtitle && !subtitleCues.length) applySubtitleResult(result.subtitle);
       setToast("Média relié au projet");
     } catch (error) {
       setToast(error.message);
     }
-  }, [activeProject, nativeMode]);
+  }, [activeProject, applySubtitleResult, nativeMode, subtitleCues.length]);
 
   const importProjectFile = useCallback(async (file) => {
     if (!file) return;
@@ -1942,7 +2067,7 @@ export function App() {
       ? nextDocuments[nextProject.id] || (nextProject.id === "demo-le-mepris" ? initialDocument() : emptyDocument())
       : emptyDocument());
     setMediaSource(nextProject?.mediaURL || "");
-    setMediaPath(nextProject?.path || "");
+    setMediaPath(mediaRenderPath(nextProject));
     setMediaPlaybackError("");
     setFileMetadata(nextProject?.metadata || null);
     setDuration(metadataDuration(nextProject?.metadata, nextProject?.path ? 1 : DURATION));
@@ -2125,7 +2250,7 @@ export function App() {
 
   const persistedState = useMemo(() => ({
     version: 6,
-    projects: projectList,
+    projects: projectList.map(withoutMediaRuntime),
     activeProjectId: activeProject?.id || null,
     documents: activeProject?.id ? { ...documents, [activeProject.id]: currentDocument } : documents,
     preferences: { leftPanel, projectRailCollapsed, muted: isMuted, shortcuts },
@@ -2140,6 +2265,23 @@ export function App() {
       setToast(error.message);
     }
   }, [hydrated, nativeMode, persistedState]);
+
+  const handleMediaPreparation = useCallback((detail) => {
+    if (!detail?.operationId) return;
+    if (["complete", "cancelled", "failed"].includes(detail.stage)) {
+      setMediaPreparation((current) => current?.operationId === detail.operationId ? null : current);
+      return;
+    }
+    setMediaPreparation({
+      operationId: detail.operationId,
+      name: detail.name || "Média local",
+      stage: detail.stage || "inspection",
+      progress: clamp(Number(detail.progress) || 0, 0, 1),
+      message: detail.message || "Préparation du média",
+      cancellable: Boolean(detail.cancellable),
+      cancelling: false,
+    });
+  }, []);
 
   useEffect(() => {
     if (!nativeMode || hydrationStartedRef.current) return undefined;
@@ -2168,6 +2310,7 @@ export function App() {
     if (!nativeMode) return undefined;
     const disposers = [
       nativeBridge.on("analyse:file-dropped", applyVideoResult),
+      nativeBridge.on("analyse:media-preparation", handleMediaPreparation),
       nativeBridge.on("analyse:subtitle-dropped", applySubtitleResult),
       nativeBridge.on("analyse:project-dropped", applyProjectResult),
       nativeBridge.on("analyse:file-rejected", (detail) => setToast(detail?.message || "Fichier non pris en charge")),
@@ -2181,7 +2324,15 @@ export function App() {
     ];
     nativeBridge.readyForEvents().catch((error) => setToast(error.message));
     return () => disposers.forEach((dispose) => dispose());
-  }, [applyProjectResult, applySubtitleResult, applyVideoResult, importSubtitle, importVideo, nativeMode, saveNow]);
+  }, [applyProjectResult, applySubtitleResult, applyVideoResult, handleMediaPreparation, importSubtitle, importVideo, nativeMode, saveNow]);
+
+  useEffect(() => {
+    if (!hydrated || !nativeMode || !activeProject?.proxyMissing || activeProject.mediaMissing || !activeProject.path) return;
+    const recoveryKey = `${activeProject.id}:${activeProject.path}`;
+    if (proxyRecoveryRef.current === recoveryKey) return;
+    proxyRecoveryRef.current = recoveryKey;
+    void prepareExistingPlayback({ automatic: true });
+  }, [activeProject, hydrated, nativeMode, prepareExistingPlayback]);
 
   useEffect(() => () => {
     if (mediaSource.startsWith("blob:")) URL.revokeObjectURL(mediaSource);
@@ -2195,6 +2346,10 @@ export function App() {
   useEffect(() => {
     setTimecodeOffsetDraft(formatTimecodeOffset(timecodeSettings));
   }, [activeProject?.id, timecodeSettings]);
+
+  useEffect(() => {
+    activeProjectIdRef.current = activeProject?.id || null;
+  }, [activeProject?.id]);
 
   useEffect(() => {
     thumbnailCacheRef.current.clear();
@@ -2747,14 +2902,19 @@ export function App() {
       setToast("Sélectionnez au moins un élément à exporter.");
       return;
     }
-    const projectPreviewAvailable = exportOptions.project && Boolean(mediaPath) && !activeProject?.mediaMissing;
-    const needsMedia = exportOptions.video
-      || exportOptions.currentFrame
+    const originalMediaAvailable = Boolean(activeProject?.path) && !activeProject?.mediaMissing;
+    const renderMediaAvailable = Boolean(mediaPath) && !activeProject?.mediaMissing;
+    const projectPreviewAvailable = exportOptions.project && renderMediaAvailable;
+    const needsOriginalMedia = exportOptions.video || (exportOptions.project && exportOptions.portableProject);
+    const needsRenderMedia = exportOptions.currentFrame
       || exportOptions.allFrames
-      || (exportOptions.project && exportOptions.portableProject)
       || (projectPreviewAvailable && annotatedFrames.length > 0);
-    if (needsMedia && (!mediaPath || activeProject?.mediaMissing)) {
-      setToast("Reliez d’abord le média original pour exporter la vidéo ou des images.");
+    if (needsOriginalMedia && !originalMediaAvailable) {
+      setToast("Reliez d’abord le média original pour l’inclure dans l’export.");
+      return;
+    }
+    if (needsRenderMedia && !renderMediaAvailable) {
+      setToast("Préparez d’abord le proxy de lecture pour exporter les images.");
       return;
     }
     if (exportOptions.allFrames && !annotatedFrames.length) {
@@ -2768,8 +2928,8 @@ export function App() {
     }
 
     const reportNeedsMedia = wantsReport && selectedReportFrames.length > 0;
-    if (reportNeedsMedia && (!mediaPath || activeProject?.mediaMissing)) {
-      setToast("Reliez d’abord le média original pour inclure les images du rapport.");
+    if (reportNeedsMedia && !renderMediaAvailable) {
+      setToast("Préparez d’abord le proxy de lecture pour inclure les images du rapport.");
       return;
     }
 
@@ -2826,7 +2986,8 @@ export function App() {
           suggestedName: safeExportBaseName(activeProject?.title),
           files,
           includeVideo: exportOptions.video,
-          mediaPath,
+          originalMediaPath: activeProject?.path || "",
+          renderMediaPath: mediaPath,
           frames,
           reports,
           projectPackage: exportOptions.project ? {
@@ -2837,7 +2998,7 @@ export function App() {
         });
         if (result?.cancelled) return;
       } else {
-        if (needsMedia || exportOptions.project || reports.length) throw new Error("Cet export nécessite l’application macOS.");
+        if (needsOriginalMedia || needsRenderMedia || exportOptions.project || reports.length) throw new Error("Cet export nécessite l’application macOS.");
         files.forEach((file) => {
           const url = URL.createObjectURL(new Blob([file.content], { type: "text/plain;charset=utf-8" }));
           const anchor = document.createElement("a");
@@ -3165,10 +3326,24 @@ export function App() {
                   <button type="button" onClick={relinkMedia}><FolderOpen size={15} /> Relier</button>
                 </div>
               )}
+              {activeProject?.proxyMissing && !activeProject?.mediaMissing && (
+                <div className="media-codec-banner" role="status">
+                  <FilmStrip size={19} />
+                  <span><strong>Proxy de lecture requis</strong>Le fichier original reste intact pendant la préparation.</span>
+                  <button type="button" disabled={Boolean(mediaPreparation)} onClick={() => void prepareExistingPlayback()}>
+                    <Play size={15} /> Préparer
+                  </button>
+                </div>
+              )}
               {mediaPlaybackError && !activeProject?.mediaMissing && (
                 <div className="media-codec-banner" role="alert">
                   <FilmStrip size={19} />
                   <span><strong>Lecture impossible</strong>{mediaPlaybackError}</span>
+                  {nativeMode && activeProject?.path && (
+                    <button type="button" disabled={Boolean(mediaPreparation)} onClick={() => void rebuildActiveMediaProxy()}>
+                      <ArrowCounterClockwise size={15} /> Créer un proxy
+                    </button>
+                  )}
                 </div>
               )}
               <div className="frame-badge">{Math.round(frameRate * 100) / 100} i/s</div>
@@ -3622,9 +3797,25 @@ export function App() {
               />
             </label>
           </section>
-          {mediaPath && nativeMode && <button className="drawer-action secondary" onClick={async () => {
+          {nativeMode && activeProject?.path && (activeProject.proxyUsed || activeProject.proxyMissing) && (
+            <section className="proxy-settings" aria-label="Proxy de lecture">
+              <div>
+                <strong>Proxy de lecture</strong>
+                <span>{activeProject.proxyMissing
+                  ? "À préparer"
+                  : activeProject.proxyMode === "remux" ? "Sans perte" : "Compatible WebKit"}</span>
+              </div>
+              {activeProject.proxyMissing ? (
+                <button type="button" disabled={Boolean(mediaPreparation)} onClick={() => void prepareExistingPlayback()}><Play size={15} /> Préparer</button>
+              ) : (
+                <button type="button" disabled={Boolean(mediaPreparation)} onClick={() => void removeActiveMediaProxy()}><Trash size={15} /> Supprimer le proxy</button>
+              )}
+              <small>La vidéo originale n’est jamais modifiée.</small>
+            </section>
+          )}
+          {activeProject?.path && nativeMode && <button className="drawer-action secondary" onClick={async () => {
             try {
-              await nativeBridge.call("revealInFinder", { path: mediaPath });
+              await nativeBridge.call("revealInFinder", { path: activeProject.path });
             } catch (error) {
               setToast(error.message);
             }
@@ -3635,6 +3826,28 @@ export function App() {
           <span className="local-only"><Check size={15} /> Fichier et analyse stockés localement</span>
         </aside>
       )}
+
+      <ModalDialog
+        open={Boolean(mediaPreparation)}
+        onClose={() => { if (mediaPreparation?.cancellable) void cancelMediaPreparation(); }}
+        labelledBy="media-preparation-title"
+        className="media-preparation-dialog"
+        initialFocusRef={mediaPreparationCancelRef}
+      >
+        <CircleNotch size={25} className="media-preparation-spinner" aria-hidden="true" />
+        <div className="media-preparation-copy">
+          <span>Traitement entièrement local</span>
+          <h2 id="media-preparation-title">Préparation du média</h2>
+          <strong>{mediaPreparation?.name}</strong>
+          <p>{mediaPreparation?.cancelling ? "Annulation en cours…" : mediaPreparation?.message}</p>
+        </div>
+        <progress value={mediaPreparation?.progress || 0} max="1" aria-label="Progression de la préparation du média" />
+        <span className="media-preparation-value">{Math.round((mediaPreparation?.progress || 0) * 100)} %</span>
+        <small>Le fichier vidéo original reste inchangé.</small>
+        {mediaPreparation?.cancellable && (
+          <button ref={mediaPreparationCancelRef} type="button" onClick={() => void cancelMediaPreparation()}>Annuler</button>
+        )}
+      </ModalDialog>
 
       <ModalDialog
         open={shortcutsOpen}
@@ -3726,7 +3939,7 @@ export function App() {
           </fieldset>
           <fieldset>
             <legend>Média</legend>
-            <label className={!mediaPath || activeProject?.mediaMissing ? "disabled" : ""}><FilmStrip size={18} /><span><strong>Vidéo originale</strong><small>Copie intacte du fichier local</small></span><input type="checkbox" disabled={!mediaPath || activeProject?.mediaMissing} checked={exportOptions.video} onChange={(event) => setExportOptions((current) => ({ ...current, video: event.target.checked }))} /></label>
+            <label className={!activeProject?.path || activeProject?.mediaMissing ? "disabled" : ""}><FilmStrip size={18} /><span><strong>Vidéo originale</strong><small>Copie intacte du fichier local</small></span><input type="checkbox" disabled={!activeProject?.path || activeProject?.mediaMissing} checked={exportOptions.video} onChange={(event) => setExportOptions((current) => ({ ...current, video: event.target.checked }))} /></label>
             <label className={!mediaPath || activeProject?.mediaMissing ? "disabled" : ""}><ImageIcon size={18} /><span><strong>Image actuelle annotée</strong><small>Image au timecode sélectionné</small></span><input type="checkbox" disabled={!mediaPath || activeProject?.mediaMissing} checked={exportOptions.currentFrame} onChange={(event) => setExportOptions((current) => ({ ...current, currentFrame: event.target.checked, allFrames: event.target.checked ? false : current.allFrames }))} /></label>
             <label className={!mediaPath || activeProject?.mediaMissing || !annotatedFrames.length ? "disabled" : ""}><Images size={18} /><span><strong>Toutes les images annotées</strong><small>{annotatedFrames.length} image{annotatedFrames.length > 1 ? "s" : ""}</small></span><input type="checkbox" disabled={!mediaPath || activeProject?.mediaMissing || !annotatedFrames.length} checked={exportOptions.allFrames} onChange={(event) => setExportOptions((current) => ({ ...current, allFrames: event.target.checked, currentFrame: event.target.checked ? false : current.currentFrame }))} /></label>
             <label><Subtitles size={18} /><span><strong>Sous-titres</strong><small>WebVTT avec timecodes</small></span><input type="checkbox" checked={exportOptions.subtitles} onChange={(event) => setExportOptions((current) => ({ ...current, subtitles: event.target.checked }))} /></label>
@@ -3736,10 +3949,10 @@ export function App() {
             <label><Info size={18} /><span><strong>Métadonnées</strong><small>Fichier média et fiche TMDB</small></span><input type="checkbox" checked={exportOptions.metadata} onChange={(event) => setExportOptions((current) => ({ ...current, metadata: event.target.checked }))} /></label>
             <label><Package size={18} /><span><strong>Projet Cinécrique</strong><small>Format .cinecrique réimportable</small></span><input type="checkbox" checked={exportOptions.project} onChange={(event) => setExportOptions((current) => ({ ...current, project: event.target.checked, portableProject: event.target.checked ? current.portableProject : false }))} /></label>
             {exportOptions.project && (
-              <label className={`export-suboption ${!mediaPath || activeProject?.mediaMissing ? "disabled" : ""}`}>
+              <label className={`export-suboption ${!activeProject?.path || activeProject?.mediaMissing ? "disabled" : ""}`}>
                 <FilmStrip size={17} />
                 <span><strong>Inclure la vidéo</strong><small>Projet portable, fichier plus volumineux</small></span>
-                <input type="checkbox" disabled={!mediaPath || activeProject?.mediaMissing} checked={exportOptions.portableProject} onChange={(event) => setExportOptions((current) => ({ ...current, portableProject: event.target.checked }))} />
+                <input type="checkbox" disabled={!activeProject?.path || activeProject?.mediaMissing} checked={exportOptions.portableProject} onChange={(event) => setExportOptions((current) => ({ ...current, portableProject: event.target.checked }))} />
               </label>
             )}
           </fieldset>

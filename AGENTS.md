@@ -28,4 +28,5 @@ When implementing from a selected generated mock, treat that image as the source
 - Frame annotations are visible only on the exact captured media frame; they remain available from the timecoded marker history.
 - Project covers can use a local image, a TMDB poster, the current frame, text, or the centered Cinécrique mark on black. Missing covers never receive a random image.
 - Common video containers are accepted through one shared web/native policy, while actual playback remains codec-dependent and reports an explicit compatibility error.
+- Non-native containers such as MKV use a local cached MP4 proxy: remux without quality loss whenever possible, transcode only incompatible tracks, keep all timecoded data in original media seconds, and always export the untouched original when video is selected.
 - V1 release artifacts are built as a versioned DMG with a SHA-256 companion file and validated through `npm run release:check`.

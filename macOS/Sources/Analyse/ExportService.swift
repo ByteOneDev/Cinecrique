@@ -114,7 +114,8 @@ enum ExportService {
     static func writeArchive(
         named baseName: String,
         textFiles: [TextFile],
-        mediaURL: URL?,
+        originalMediaURL: URL?,
+        renderMediaURL: URL?,
         includeVideo: Bool,
         frames: [Frame],
         reports: [Report],
@@ -130,21 +131,25 @@ enum ExportService {
         for file in textFiles {
             try writeSingleText(file, to: packageDirectory.appendingPathComponent(file.name))
         }
-        if includeVideo, let mediaURL {
-            try copyVideo(from: mediaURL, to: packageDirectory.appendingPathComponent(mediaURL.lastPathComponent))
+        if includeVideo, let originalMediaURL {
+            try copyVideo(
+                from: originalMediaURL,
+                to: packageDirectory.appendingPathComponent(originalMediaURL.lastPathComponent)
+            )
         }
         for frame in frames {
-            guard let mediaURL else { throw ExportError.missingMedia }
-            try writeFrame(frame, mediaURL: mediaURL, to: packageDirectory.appendingPathComponent(frame.name))
+            guard let renderMediaURL else { throw ExportError.missingMedia }
+            try writeFrame(frame, mediaURL: renderMediaURL, to: packageDirectory.appendingPathComponent(frame.name))
         }
         for report in reports {
-            try writeReport(report, mediaURL: mediaURL, to: packageDirectory.appendingPathComponent(report.name))
+            try writeReport(report, mediaURL: renderMediaURL, to: packageDirectory.appendingPathComponent(report.name))
         }
         if let projectPackage {
             try writeProjectPackage(
                 projectPackage,
                 named: baseName,
-                mediaURL: mediaURL,
+                originalMediaURL: originalMediaURL,
+                renderMediaURL: renderMediaURL,
                 to: packageDirectory.appendingPathComponent("\(baseName).cinecrique")
             )
         }
@@ -240,7 +245,8 @@ enum ExportService {
     static func writeProjectPackage(
         _ package: ProjectPackage,
         named baseName: String,
-        mediaURL: URL?,
+        originalMediaURL: URL?,
+        renderMediaURL: URL?,
         to destination: URL
     ) throws {
         guard JSONSerialization.isValidJSONObject(package.state) else { throw ExportError.invalidProject }
@@ -262,20 +268,20 @@ enum ExportService {
             "portable": package.includeVideo,
         ]
         if package.includeVideo {
-            guard let mediaURL else { throw ExportError.missingMedia }
+            guard let originalMediaURL else { throw ExportError.missingMedia }
             let mediaDirectory = contentDirectory.appendingPathComponent("Media", isDirectory: true)
             try manager.createDirectory(at: mediaDirectory, withIntermediateDirectories: false, attributes: [.posixPermissions: 0o700])
-            let mediaName = ProjectArchivePolicy.portableMediaFileName(for: mediaURL.lastPathComponent)
-            try copyVideo(from: mediaURL, to: mediaDirectory.appendingPathComponent(mediaName))
+            let mediaName = ProjectArchivePolicy.portableMediaFileName(for: originalMediaURL.lastPathComponent)
+            try copyVideo(from: originalMediaURL, to: mediaDirectory.appendingPathComponent(mediaName))
             manifest["embeddedMedia"] = "Media/\(mediaName)"
         }
 
         if !package.frames.isEmpty {
-            guard let mediaURL else { throw ExportError.missingMedia }
+            guard let renderMediaURL else { throw ExportError.missingMedia }
             let previewsDirectory = contentDirectory.appendingPathComponent("Previews", isDirectory: true)
             try manager.createDirectory(at: previewsDirectory, withIntermediateDirectories: false, attributes: [.posixPermissions: 0o700])
             for frame in package.frames {
-                try writeFrame(frame, mediaURL: mediaURL, to: previewsDirectory.appendingPathComponent(frame.name))
+                try writeFrame(frame, mediaURL: renderMediaURL, to: previewsDirectory.appendingPathComponent(frame.name))
             }
         }
 
