@@ -101,12 +101,55 @@ if [[ -n "$APP_BINARY" ]]; then
       }
       NATIVE_PROXY="$(/usr/bin/find "$NATIVE_SUPPORT/Media Proxies" -type f -name playback.mp4 -print -quit)"
       [[ -n "$NATIVE_PROXY" ]] || { echo "native playback proxy is missing" >&2; exit 1; }
-      "$FFMPEG" -hide_banner -loglevel error -nostdin -i "$NATIVE_PROXY" -f null -
+      "$FFMPEG" -hide_banner -loglevel error -nostdin -fflags +genpts -i "$NATIVE_PROXY" -f null -
       ;;
     *)
       echo "warning: native proxy check skipped because VideoToolbox is unavailable in this environment" >&2
       ;;
   esac
+
+  DISTINCT="$CHECK_ROOT/distinct-frames.mov"
+  "$FFMPEG" -hide_banner -loglevel error -nostdin -y \
+    -f lavfi -i 'color=c=red:size=48x48:rate=24:duration=1' \
+    -f lavfi -i 'color=c=lime:size=48x48:rate=24:duration=1' \
+    -f lavfi -i 'color=c=blue:size=48x48:rate=24:duration=1' \
+    -filter_complex '[0:v][1:v][2:v]concat=n=3:v=1:a=0,format=rgb24[v]' \
+    -map '[v]' -c:v qtrle "$DISTINCT"
+
+  check_frame_color() {
+    local time="$1"
+    local expected="$2"
+    local output="$CHECK_ROOT/frame-$expected.png"
+    local exact_error="$CHECK_ROOT/exact-frame-$expected.err"
+    if ! "$APP_BINARY" --check-exact-frame "$DISTINCT" "$time" "$output" > /dev/null 2> "$exact_error"; then
+      if /usr/bin/grep -Eq 'Cannot Decode|Cannot Open' "$exact_error"; then
+        echo "warning: exact-frame fixture skipped because AVFoundation cannot decode the generated test clip" >&2
+        return 0
+      fi
+      /bin/cat "$exact_error" >&2
+      exit 1
+    fi
+    local rgb
+    rgb=($("$FFMPEG" -hide_banner -loglevel error -nostdin -i "$output" -frames:v 1 -vf 'scale=1:1,format=rgb24' -f rawvideo - 2>/dev/null | /usr/bin/od -An -tu1 -N3))
+    local r="${rgb[0]:-0}"
+    local g="${rgb[1]:-0}"
+    local b="${rgb[2]:-0}"
+    case "$expected" in
+      red)
+        (( r > 150 && g < 110 && b < 110 )) || { echo "exact frame color mismatch for red: $r $g $b" >&2; exit 1; }
+        ;;
+      green)
+        (( g > 120 && r < 130 && b < 130 )) || { echo "exact frame color mismatch for green: $r $g $b" >&2; exit 1; }
+        ;;
+      blue)
+        (( b > 150 && r < 110 && g < 140 )) || { echo "exact frame color mismatch for blue: $r $g $b" >&2; exit 1; }
+        ;;
+    esac
+  }
+
+  check_frame_color 0.5 red
+  check_frame_color 1.5 green
+  check_frame_color 2.5 blue
 fi
 
 echo "media proxy check passed: MKV $VIDEO_CODEC/AAC + WebVTT"

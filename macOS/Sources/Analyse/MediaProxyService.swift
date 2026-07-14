@@ -359,28 +359,15 @@ final class MediaProxyService {
     private func ensureFreeSpace(for sourceURL: URL) throws {
         let sourceValues = try sourceURL.resourceValues(forKeys: [.fileSizeKey])
         guard let fileSize = sourceValues.fileSize else { throw ProxyError.invalidSource }
-        let rootValues = try cacheRoot.resourceValues(forKeys: [
-            .volumeAvailableCapacityForImportantUsageKey,
-            .volumeAvailableCapacityKey,
-        ])
-        var reportedCapacities: [Int64] = []
-        if let value = rootValues.volumeAvailableCapacityForImportantUsage, value > 0 {
-            reportedCapacities.append(value)
+        do {
+            try StorageCapacityPolicy.ensureSpace(
+                at: cacheRoot,
+                payloadBytes: Int64(fileSize),
+                fileManager: fileManager
+            )
+        } catch {
+            throw ProxyError.insufficientSpace
         }
-        if let value = rootValues.volumeAvailableCapacity, value > 0 {
-            reportedCapacities.append(Int64(value))
-        }
-        if
-            let attributes = try? fileManager.attributesOfFileSystem(forPath: cacheRoot.path),
-            let value = attributes[.systemFreeSize] as? NSNumber,
-            value.int64Value > 0
-        {
-            reportedCapacities.append(value.int64Value)
-        }
-        let available = reportedCapacities.max() ?? Int64.max
-        let sourceBytes = Int64(fileSize)
-        let required = max(512 * 1_024 * 1_024, sourceBytes + sourceBytes / 10)
-        guard available > required else { throw ProxyError.insufficientSpace }
     }
 
     private func validatedRegularFile(_ url: URL) throws -> Bool {

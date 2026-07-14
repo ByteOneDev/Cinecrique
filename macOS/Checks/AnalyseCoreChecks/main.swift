@@ -124,10 +124,77 @@ do {
     } catch ProjectArchiveError.duplicateEntry {
         // Expected.
     }
+    do {
+        _ = try ProjectArchivePolicy.validatedEntries(["Previews/café.png", "Previews/cafe\u{301}.png"])
+        throw CheckError.failed("Unicode-normalized archive collision should throw")
+    } catch ProjectArchiveError.duplicateEntry {
+        // Expected.
+    }
+    do {
+        _ = try ProjectArchivePolicy.validatedEntries(
+            (0...ProjectArchivePolicy.maxEntries).map { "Frames/\($0).png" }
+        )
+        throw CheckError.failed("archive with too many entries should throw")
+    } catch ProjectArchiveError.invalidEntryCount {
+        // Expected.
+    }
+    do {
+        let listing = ProjectArchiveListingAccumulator()
+        try listing.append(Data(repeating: 0x61, count: ProjectArchivePolicy.maxEntryNameBytes + 2))
+        throw CheckError.failed("oversized listing line should stop immediately")
+    } catch ProjectArchiveError.unsafeEntry {
+        // Expected.
+    }
+    do {
+        let listing = ProjectArchiveListingAccumulator()
+        let status = try BoundedProcessRunner.streamStandardOutput(
+            executableURL: URL(fileURLWithPath: "/usr/bin/yes"),
+            arguments: ["frame.png"],
+            timeout: 3
+        ) { try listing.append($0) }
+        _ = status
+        throw CheckError.failed("streaming listing should stop after the entry cap")
+    } catch ProjectArchiveError.invalidEntryCount {
+        // Expected.
+    }
+    do {
+        _ = try BoundedProcessRunner.streamStandardOutput(
+            executableURL: URL(fileURLWithPath: "/bin/sleep"),
+            arguments: ["2"],
+            timeout: 0.05
+        ) { _ in }
+        throw CheckError.failed("bounded process should time out")
+    } catch BoundedProcessError.timedOut {
+        // Expected.
+    }
     try expect(
-        ProjectArchivePolicy.expandedByteLimit(compressedBytes: 1_024) == 512 * 1_024 * 1_024,
+        ProjectArchivePolicy.expandedByteLimit(compressedBytes: 1_024) == 64 * 1_024 * 1_024,
         "archive expansion allowance has a bounded minimum"
     )
+    do {
+        try ProjectArchivePolicy.validateExpansion(
+            compressedBytes: 1 * 1_024 * 1_024,
+            expandedBytes: 300 * 1_024 * 1_024
+        )
+        throw CheckError.failed("strongly compressed archive should be rejected")
+    } catch ProjectArchiveError.expandedDataTooLarge {
+        // Expected.
+    }
+    try expect(
+        StorageCapacityPolicy.hasSufficientSpace(availableBytes: 2_000_000_000, payloadBytes: 1_000_000_000),
+        "disk preflight accepts sufficient capacity"
+    )
+    try expect(
+        !StorageCapacityPolicy.hasSufficientSpace(availableBytes: 1_000_000_000, payloadBytes: 1_000_000_000),
+        "disk preflight includes overhead and reserve"
+    )
+    try FrameAccuracyPolicy.validate(requestedSeconds: 10, actualSeconds: 10 + 0.01, frameRate: 24)
+    do {
+        try FrameAccuracyPolicy.validate(requestedSeconds: 10, actualSeconds: 10.1, frameRate: 24)
+        throw CheckError.failed("neighbor frame drift should throw")
+    } catch FrameAccuracyError.inexactFrame {
+        // Expected.
+    }
     try expect(
         ProjectArchivePolicy.portableMediaFileName(for: "Un film à Marseille.MP4") == "media.mp4",
         "portable media names remain ASCII and preserve the extension"
@@ -140,6 +207,47 @@ do {
     try expect(MediaFormatPolicy.acceptsVideoExtension("mxf"), "accept professional MXF containers")
     try expect(MediaFormatPolicy.acceptsVideoExtension("vob"), "accept legacy DVD video containers")
     try expect(!MediaFormatPolicy.acceptsVideoExtension("exe"), "reject non-video extensions")
+    try expect(
+        !MediaToolPolicy.allowsExternalDevelopmentFallback(isDebug: false, environmentValue: "1"),
+        "release builds never use external media tools"
+    )
+    try expect(
+        MediaToolPolicy.allowsExternalDevelopmentFallback(isDebug: true, environmentValue: "1"),
+        "external media tools require an explicit development opt-in"
+    )
+
+    try PersistedStatePolicy.validate([
+        "version": 6,
+        "projects": [["id": "film"]],
+        "documents": ["film": ["markers": [], "annotationsByMarker": [:], "subtitleCues": []]],
+    ])
+    do {
+        try PersistedStatePolicy.validate([
+            "version": 6,
+            "projects": [],
+            "documents": [:],
+            "__proto__": ["polluted": true],
+        ])
+        throw CheckError.failed("prototype-polluting keys should throw")
+    } catch PersistedStateError.unsafeKey {
+        // Expected.
+    }
+    do {
+        try PersistedStatePolicy.validate([
+            "version": 6,
+            "projects": [["id": "film"]],
+            "documents": ["film": [
+                "markers": [],
+                "annotationsByMarker": ["1": [[
+                    "type": "pencil",
+                    "points": Array(repeating: ["x": 0.5, "y": 0.5], count: PersistedStatePolicy.maxPencilPoints + 1),
+                ]]],
+            ]],
+        ])
+        throw CheckError.failed("oversized pencil stroke should throw")
+    } catch PersistedStateError.tooManyPencilPoints {
+        // Expected.
+    }
 
     let mkvRemux = MediaProxyPolicy.decision(
         fileExtension: "mkv",
@@ -223,7 +331,34 @@ do {
     let prunedSnapshots = try fileManager.contentsOfDirectory(at: snapshotsDirectory, includingPropertiesForKeys: nil)
     try expect(prunedSnapshots.count == 10, "snapshot cap remains stable after recovery")
 
-    print("AnalyseCoreChecks: 45 checks passed")
+    let restorePoint = try store.createRestorableSnapshot()
+    try expect(restorePoint != nil, "explicit replacement snapshot is created")
+    try store.save(["version": 14, "projects": [["id": "replacement", "title": "Replacement"]]])
+    let restored = try store.restoreSnapshot(named: restorePoint!) as? [String: Any]
+    try expect((restored?["version"] as? NSNumber)?.intValue == 13, "explicit snapshot can restore replaced state")
+
+    let unsafeStoreDirectory = fileManager.temporaryDirectory
+        .appendingPathComponent("Cinecrique-UnsafeSnapshots-\(UUID().uuidString)", isDirectory: true)
+    let redirectedDirectory = fileManager.temporaryDirectory
+        .appendingPathComponent("Cinecrique-RedirectedSnapshots-\(UUID().uuidString)", isDirectory: true)
+    defer {
+        try? fileManager.removeItem(at: unsafeStoreDirectory)
+        try? fileManager.removeItem(at: redirectedDirectory)
+    }
+    try fileManager.createDirectory(at: unsafeStoreDirectory, withIntermediateDirectories: true)
+    try fileManager.createDirectory(at: redirectedDirectory, withIntermediateDirectories: true)
+    try fileManager.createSymbolicLink(
+        at: unsafeStoreDirectory.appendingPathComponent("Snapshots"),
+        withDestinationURL: redirectedDirectory
+    )
+    do {
+        _ = try AppStateStore(testDirectory: unsafeStoreDirectory)
+        throw CheckError.failed("symlinked snapshots directory should throw")
+    } catch {
+        try expect(error.localizedDescription.contains("pas sûr"), "unsafe snapshots directory is rejected")
+    }
+
+    print("AnalyseCoreChecks: extended checks passed")
 } catch {
     fputs("AnalyseCoreChecks failed: \(error)\n", stderr)
     exit(1)

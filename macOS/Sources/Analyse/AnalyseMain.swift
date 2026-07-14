@@ -8,6 +8,9 @@ enum CinecriqueMain {
         if CommandLine.arguments.dropFirst().first == "--check-media-proxy" {
             exit(runMediaProxyCheck(arguments: Array(CommandLine.arguments.dropFirst(2))))
         }
+        if CommandLine.arguments.dropFirst().first == "--check-exact-frame" {
+            exit(runExactFrameCheck(arguments: Array(CommandLine.arguments.dropFirst(2))))
+        }
         let application = NSApplication.shared
         let delegate = AppDelegate()
         application.delegate = delegate
@@ -44,6 +47,30 @@ enum CinecriqueMain {
             return 0
         } catch {
             fputs("media proxy check failed: \(error.localizedDescription)\n", stderr)
+            return 1
+        }
+    }
+
+    private static func runExactFrameCheck(arguments: [String]) -> Int32 {
+        guard arguments.count == 3, let time = Double(arguments[1]) else {
+            fputs("usage: Cinecrique --check-exact-frame <source> <time-seconds> <png-output>\n", stderr)
+            return 2
+        }
+        do {
+            let sourceURL = URL(fileURLWithPath: arguments[0]).standardizedFileURL
+            let outputURL = URL(fileURLWithPath: arguments[2]).standardizedFileURL
+            try ExportService.writeFrame(
+                ExportService.Frame(name: outputURL.lastPathComponent, time: time, annotations: []),
+                mediaURL: sourceURL,
+                to: outputURL
+            )
+            let result: [String: Any] = ["time": time, "path": outputURL.path]
+            let data = try JSONSerialization.data(withJSONObject: result, options: [.sortedKeys])
+            FileHandle.standardOutput.write(data)
+            FileHandle.standardOutput.write(Data("\n".utf8))
+            return 0
+        } catch {
+            fputs("exact frame check failed: \(error.localizedDescription)\n", stderr)
             return 1
         }
     }

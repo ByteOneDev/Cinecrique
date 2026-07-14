@@ -1,9 +1,10 @@
 import AppKit
 
-final class AppDelegate: NSObject, NSApplicationDelegate {
+final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
     private var window: NSWindow?
     private var webController: WebAppViewController?
     private var pendingExternalFiles: [URL] = []
+    private var closingAfterFlush = false
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         configureMainMenu()
@@ -22,6 +23,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         window.backgroundColor = .black
         window.minSize = NSSize(width: 960, height: 680)
         window.contentViewController = controller
+        window.delegate = self
         window.setFrameAutosaveName("Cinecrique.MainWindow")
         window.center()
         window.makeKeyAndOrderFront(nil)
@@ -40,6 +42,29 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool {
         true
+    }
+
+    func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply {
+        guard let webController else { return .terminateNow }
+        webController.requestFrontendFlush(reason: "terminate", timeout: 5) { success in
+            NSApp.reply(toApplicationShouldTerminate: success)
+        }
+        return .terminateLater
+    }
+
+    func windowShouldClose(_ sender: NSWindow) -> Bool {
+        guard !closingAfterFlush, let webController else { return true }
+        webController.requestFrontendFlush(reason: "window-close", timeout: 5) { [weak self, weak sender] success in
+            guard let self, let sender else { return }
+            if success {
+                self.closingAfterFlush = true
+                sender.performClose(nil)
+                self.closingAfterFlush = false
+            } else {
+                webController.dispatchToast("La sauvegarde n’a pas été confirmée, fermeture annulée.")
+            }
+        }
+        return false
     }
 
     func application(_ application: NSApplication, open urls: [URL]) {
@@ -68,7 +93,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     @objc private func reloadInterface(_ sender: Any?) {
-        webController?.reload()
+        webController?.reloadAfterFlush()
     }
 
     private func configureMainMenu() {

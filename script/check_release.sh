@@ -62,6 +62,10 @@ trap cleanup EXIT
 /usr/bin/ditto --norsrc "$APP" "$PACKAGE_CHECK_ROOT/app-copy/$APP_NAME.app"
 /usr/bin/xattr -cr "$PACKAGE_CHECK_ROOT/app-copy/$APP_NAME.app"
 /usr/bin/codesign --verify --deep --strict "$PACKAGE_CHECK_ROOT/app-copy/$APP_NAME.app"
+if /usr/bin/strings "$PACKAGE_CHECK_ROOT/app-copy/$APP_NAME.app/Contents/MacOS/Cinecrique" | /usr/bin/grep -E '/(opt/homebrew|usr/local|opt/local)/bin/ff(mpeg|probe)' >/dev/null; then
+  echo "release binary contains external FFmpeg fallback paths" >&2
+  exit 1
+fi
 PACKAGE_FFMPEG="$PACKAGE_CHECK_ROOT/app-copy/$APP_NAME.app/Contents/Resources/Tools/ffmpeg"
 [[ -x "$PACKAGE_FFMPEG" ]] || { echo "bundled FFmpeg is missing" >&2; exit 1; }
 PACKAGE_FFMPEG_VERSION="$($PACKAGE_FFMPEG -version 2>&1)"

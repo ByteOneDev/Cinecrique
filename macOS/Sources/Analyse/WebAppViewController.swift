@@ -89,10 +89,60 @@ final class WebAppViewController: NSViewController, WKNavigationDelegate {
         webView.reload()
     }
 
+    func reloadAfterFlush() {
+        requestFrontendFlush(reason: "reload", timeout: 5) { [weak self] success in
+            guard let self else { return }
+            if success {
+                self.reload()
+            } else {
+                self.dispatchToast("La sauvegarde n’a pas été confirmée, rechargement annulé.")
+            }
+        }
+    }
+
+    func requestFrontendFlush(reason: String, timeout: TimeInterval, completion: @escaping (Bool) -> Void) {
+        guard isReady else {
+            completion(false)
+            return
+        }
+        var completed = false
+        let finish: (Bool) -> Void = { success in
+            guard !completed else { return }
+            completed = true
+            completion(success)
+        }
+        DispatchQueue.main.asyncAfter(deadline: .now() + timeout) {
+            finish(false)
+        }
+        webView.callAsyncJavaScript(
+            "return await window.__CINECRIQUE_FLUSH__?.(reason);",
+            arguments: ["reason": reason],
+            in: nil,
+            in: .page
+        ) { result in
+            switch result {
+            case .success(let value):
+                finish((value as? Bool) == true)
+            case .failure:
+                finish(false)
+            }
+        }
+    }
+
     func dispatchEvent(named name: String) {
         webView.callAsyncJavaScript(
             "window.dispatchEvent(new CustomEvent(name));",
             arguments: ["name": name],
+            in: nil,
+            in: .page,
+            completionHandler: nil
+        )
+    }
+
+    func dispatchToast(_ message: String) {
+        webView.callAsyncJavaScript(
+            "window.dispatchEvent(new CustomEvent('analyse:file-rejected', { detail: { message } }));",
+            arguments: ["message": message],
             in: nil,
             in: .page,
             completionHandler: nil

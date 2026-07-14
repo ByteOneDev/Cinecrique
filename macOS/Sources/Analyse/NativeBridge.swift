@@ -13,8 +13,11 @@ final class NativeBridge: NSObject, WKScriptMessageHandler {
     private let credentialStore = CredentialStore()
     private let tmdbService = TMDBService()
     private let workQueue = DispatchQueue(label: "app.analyse.native-bridge", qos: .userInitiated)
+    private let stateQueue = DispatchQueue(label: "app.analyse.state-store", qos: .userInitiated)
     private let mediaProxyService: MediaProxyService?
     private let mediaProxyInitializationError: String?
+    private let pendingImportLock = NSLock()
+    private var pendingImportedMedia: [String: URL] = [:]
 
     override init() {
         let loadedStore: AppStateStore?
@@ -44,6 +47,14 @@ final class NativeBridge: NSObject, WKScriptMessageHandler {
             mediaProxyInitializationError = storeError
         }
         super.init()
+    }
+
+    deinit {
+        pendingImportLock.lock()
+        let directories = Array(pendingImportedMedia.values)
+        pendingImportedMedia.removeAll()
+        pendingImportLock.unlock()
+        for directory in directories { try? FileManager.default.removeItem(at: directory) }
     }
 
     static let injectedScript = #"""
@@ -158,12 +169,20 @@ final class NativeBridge: NSObject, WKScriptMessageHandler {
             downloadTMDBCover(payload: payload, identifier: identifier)
         case "saveState":
             saveState(payload: payload, identifier: identifier)
+        case "createStateSnapshot":
+            createStateSnapshot(identifier: identifier)
+        case "restoreStateSnapshot":
+            restoreStateSnapshot(payload: payload, identifier: identifier)
         case "loadState":
             loadState(identifier: identifier)
         case "exportProject":
             exportProject(payload: payload, identifier: identifier)
         case "importProject":
             importProject(identifier: identifier)
+        case "commitImportedProject":
+            finishImportedProject(payload: payload, discard: false, identifier: identifier)
+        case "discardImportedProject":
+            finishImportedProject(payload: payload, discard: true, identifier: identifier)
         case "exportSelection":
             exportSelection(payload: payload, identifier: identifier)
         case "exportComparison":
@@ -676,7 +695,7 @@ final class NativeBridge: NSObject, WKScriptMessageHandler {
         else { throw ProjectImportError.invalidFile }
 
         let extensionName = safeURL.pathExtension.lowercased()
-        let result: (state: [String: Any], version: Int, portable: Bool)
+        let result: (state: [String: Any], version: Int, portable: Bool, importToken: String?)
         if extensionName == "cinecrique" {
             guard Int64(rawSize) <= ProjectArchivePolicy.maxArchiveBytes else {
                 throw ProjectImportError.archiveTooLarge
@@ -688,20 +707,28 @@ final class NativeBridge: NSObject, WKScriptMessageHandler {
             }
             let rawState = try Self.readJSONObject(at: safeURL, maximumBytes: AppStateStore.maxStateBytes)
             guard let state = Self.validatedImportedState(rawState) else { throw ProjectImportError.invalidProject }
-            result = (state, (rawState["version"] as? NSNumber)?.intValue ?? 1, false)
+            result = (state, (rawState["version"] as? NSNumber)?.intValue ?? 1, false, nil)
         }
 
-        return [
+        var response: [String: Any] = [
             "cancelled": false,
             "name": safeURL.lastPathComponent,
             "state": restoreMediaRuntime(in: result.state) ?? result.state,
             "recovered": result.version < 6,
             "portable": result.portable,
         ]
+        if let importToken = result.importToken { response["importToken"] = importToken }
+        return response
     }
 
-    private func importProjectPackage(from archiveURL: URL, compressedBytes: Int64) throws -> (state: [String: Any], version: Int, portable: Bool) {
+    private func importProjectPackage(from archiveURL: URL, compressedBytes: Int64) throws -> (state: [String: Any], version: Int, portable: Bool, importToken: String?) {
         let manager = FileManager.default
+        let expandedLimit = ProjectArchivePolicy.expandedByteLimit(compressedBytes: compressedBytes)
+        do {
+            try StorageCapacityPolicy.ensureSpace(at: manager.temporaryDirectory, payloadBytes: expandedLimit)
+        } catch {
+            throw ProjectImportError.insufficientSpace
+        }
         let temporaryRoot = manager.temporaryDirectory.appendingPathComponent("Cinecrique-Import-\(UUID().uuidString)", isDirectory: true)
         try manager.createDirectory(at: temporaryRoot, withIntermediateDirectories: true, attributes: [.posixPermissions: 0o700])
         defer { try? manager.removeItem(at: temporaryRoot) }
@@ -711,7 +738,7 @@ final class NativeBridge: NSObject, WKScriptMessageHandler {
             archiveURL,
             entries: entries,
             to: temporaryRoot,
-            maximumBytes: ProjectArchivePolicy.expandedByteLimit(compressedBytes: compressedBytes)
+            maximumBytes: expandedLimit
         )
         let packageRoot = try Self.projectPackageRoot(in: temporaryRoot)
         let manifest = try Self.readJSONObject(
@@ -731,12 +758,18 @@ final class NativeBridge: NSObject, WKScriptMessageHandler {
         guard Self.validatedImportedState(rawState) != nil else { throw ProjectImportError.invalidProject }
 
         var portable = false
+        var importedMediaDirectory: URL?
+        var importToken: String?
+        defer {
+            if let importedMediaDirectory { try? manager.removeItem(at: importedMediaDirectory) }
+        }
         if let embeddedPath = manifest["embeddedMedia"] as? String {
             _ = try ProjectArchivePolicy.validatedEntries([embeddedPath])
             let sourceURL = packageRoot.appendingPathComponent(embeddedPath).standardizedFileURL
             let rootPrefix = packageRoot.standardizedFileURL.path + "/"
             guard sourceURL.path.hasPrefix(rootPrefix) else { throw ProjectImportError.invalidArchive }
             let importedMediaURL = try persistEmbeddedMedia(try Self.validatedVideoURL(sourceURL))
+            importedMediaDirectory = importedMediaURL.deletingLastPathComponent()
             let activeIdentifier = rawState["activeProjectId"] as? String
             var projects = rawState["projects"] as? [[String: Any]] ?? []
             let targetIndex = projects.firstIndex(where: { ($0["id"] as? String) == activeIdentifier })
@@ -750,7 +783,15 @@ final class NativeBridge: NSObject, WKScriptMessageHandler {
         }
 
         guard let state = Self.validatedImportedState(rawState) else { throw ProjectImportError.invalidProject }
-        return (state, (rawState["version"] as? NSNumber)?.intValue ?? 1, portable)
+        if portable, let directory = importedMediaDirectory {
+            let token = UUID().uuidString
+            pendingImportLock.lock()
+            pendingImportedMedia[token] = directory
+            pendingImportLock.unlock()
+            importToken = token
+            importedMediaDirectory = nil
+        }
+        return (state, (rawState["version"] as? NSNumber)?.intValue ?? 1, portable, importToken)
     }
 
     private func persistEmbeddedMedia(_ sourceURL: URL) throws -> URL {
@@ -767,6 +808,13 @@ final class NativeBridge: NSObject, WKScriptMessageHandler {
             }
         } else {
             try manager.createDirectory(at: importedRoot, withIntermediateDirectories: false, attributes: [.posixPermissions: 0o700])
+        }
+        let sourceValues = try sourceURL.resourceValues(forKeys: [.fileSizeKey])
+        guard let sourceBytes = sourceValues.fileSize else { throw ProjectImportError.storageUnavailable }
+        do {
+            try StorageCapacityPolicy.ensureSpace(at: importedRoot, payloadBytes: Int64(sourceBytes))
+        } catch {
+            throw ProjectImportError.insufficientSpace
         }
         let destinationDirectory = importedRoot.appendingPathComponent(UUID().uuidString, isDirectory: true)
         try manager.createDirectory(at: destinationDirectory, withIntermediateDirectories: false, attributes: [.posixPermissions: 0o700])
@@ -840,7 +888,14 @@ final class NativeBridge: NSObject, WKScriptMessageHandler {
             respond(identifier: identifier, error: "État du projet manquant.")
             return
         }
-        workQueue.async { [weak self] in
+        do {
+            try PersistedStatePolicy.validate(state)
+        } catch {
+            respond(identifier: identifier, error: error.localizedDescription)
+            return
+        }
+        let revision = (payload["revision"] as? NSNumber)?.intValue ?? 0
+        stateQueue.async { [weak self] in
             guard let self else { return }
             guard let stateStore = self.stateStore else {
                 self.respond(identifier: identifier, error: self.stateStoreInitializationError ?? "Le stockage local est indisponible.")
@@ -848,7 +903,45 @@ final class NativeBridge: NSObject, WKScriptMessageHandler {
             }
             do {
                 try stateStore.save(state)
-                self.respond(identifier: identifier, result: ["saved": true])
+                self.respond(identifier: identifier, result: ["saved": true, "revision": revision])
+            } catch {
+                self.respond(identifier: identifier, error: error.localizedDescription)
+            }
+        }
+    }
+
+    private func createStateSnapshot(identifier: String) {
+        stateQueue.async { [weak self] in
+            guard let self else { return }
+            guard let stateStore = self.stateStore else {
+                self.respond(identifier: identifier, error: self.stateStoreInitializationError ?? "Le stockage local est indisponible.")
+                return
+            }
+            do {
+                let snapshot = try stateStore.createRestorableSnapshot()
+                let result: [String: Any] = snapshot.map { ["snapshotId": $0] } ?? ["snapshotId": NSNull()]
+                self.respond(identifier: identifier, result: result)
+            } catch {
+                self.respond(identifier: identifier, error: error.localizedDescription)
+            }
+        }
+    }
+
+    private func restoreStateSnapshot(payload: [String: Any], identifier: String) {
+        guard let snapshotID = payload["snapshotId"] as? String, snapshotID.utf8.count <= 256 else {
+            respond(identifier: identifier, error: "Snapshot invalide.")
+            return
+        }
+        stateQueue.async { [weak self] in
+            guard let self else { return }
+            guard let stateStore = self.stateStore else {
+                self.respond(identifier: identifier, error: self.stateStoreInitializationError ?? "Le stockage local est indisponible.")
+                return
+            }
+            do {
+                let restored = try stateStore.restoreSnapshot(named: snapshotID)
+                guard let safe = Self.sanitizedPersistedState(restored) else { throw ProjectImportError.invalidProject }
+                self.respond(identifier: identifier, result: self.restoreMediaRuntime(in: safe) ?? safe)
             } catch {
                 self.respond(identifier: identifier, error: error.localizedDescription)
             }
@@ -856,7 +949,7 @@ final class NativeBridge: NSObject, WKScriptMessageHandler {
     }
 
     private func loadState(identifier: String) {
-        workQueue.async { [weak self] in
+        stateQueue.async { [weak self] in
             guard let self else { return }
             guard let stateStore = self.stateStore else {
                 self.respond(identifier: identifier, error: self.stateStoreInitializationError ?? "Le stockage local est indisponible.")
@@ -938,6 +1031,30 @@ final class NativeBridge: NSObject, WKScriptMessageHandler {
                 }
             }
         }
+    }
+
+    private func finishImportedProject(payload: [String: Any], discard: Bool, identifier: String) {
+        guard let token = payload["importToken"] as? String, token.utf8.count <= 128 else {
+            respond(identifier: identifier, error: "Import portable invalide.")
+            return
+        }
+        pendingImportLock.lock()
+        let directory = pendingImportedMedia.removeValue(forKey: token)
+        pendingImportLock.unlock()
+        guard let directory else {
+            respond(identifier: identifier, error: "Cet import portable n’est plus disponible.")
+            return
+        }
+        if discard {
+            do {
+                try FileManager.default.removeItem(at: directory)
+            } catch {
+                respond(identifier: identifier, error: "Le média temporaire importé n’a pas pu être nettoyé.")
+                return
+            }
+        }
+        let key = discard ? "discarded" : "committed"
+        respond(identifier: identifier, result: [key: true])
     }
 
     private func exportSelection(payload: [String: Any], identifier: String) {
@@ -1217,12 +1334,7 @@ final class NativeBridge: NSObject, WKScriptMessageHandler {
     }
 
     private static func validatedImportedState(_ rawState: [String: Any]) -> [String: Any]? {
-        guard
-            let projects = rawState["projects"] as? [Any],
-            projects.count <= 500,
-            (!projects.isEmpty || ((rawState["version"] as? NSNumber)?.intValue ?? 0) >= 5),
-            projects.allSatisfy({ $0 is [String: Any] })
-        else { return nil }
+        guard (try? PersistedStatePolicy.validate(rawState)) != nil else { return nil }
         return sanitizedPersistedState(rawState)
     }
 
@@ -1243,26 +1355,17 @@ final class NativeBridge: NSObject, WKScriptMessageHandler {
     }
 
     private static func archiveEntries(at archiveURL: URL) throws -> [String] {
-        let process = Process()
-        let output = Pipe()
-        process.executableURL = URL(fileURLWithPath: "/usr/bin/unzip")
-        process.arguments = ["-Z1", archiveURL.path]
-        process.standardOutput = output
-        process.standardError = FileHandle.nullDevice
+        let listing = ProjectArchiveListingAccumulator()
         do {
-            try process.run()
-        } catch {
-            throw ProjectImportError.invalidArchive
-        }
-        let data = output.fileHandleForReading.readDataToEndOfFile()
-        process.waitUntilExit()
-        guard
-            process.terminationStatus == 0,
-            let listing = String(data: data, encoding: .utf8)
-        else { throw ProjectImportError.invalidArchive }
-        let names = listing.split(whereSeparator: { $0.isNewline }).map(String.init)
-        do {
-            return try ProjectArchivePolicy.validatedEntries(names)
+            let status = try BoundedProcessRunner.streamStandardOutput(
+                executableURL: URL(fileURLWithPath: "/usr/bin/unzip"),
+                arguments: ["-Z1", archiveURL.path],
+                timeout: ProjectArchivePolicy.listingTimeout
+            ) { chunk in
+                try listing.append(chunk)
+            }
+            guard status == 0 else { throw ProjectImportError.invalidArchive }
+            return try listing.finish()
         } catch {
             throw ProjectImportError.invalidArchive
         }
@@ -1296,34 +1399,23 @@ final class NativeBridge: NSObject, WKScriptMessageHandler {
                 throw ProjectImportError.invalidArchive
             }
             let writer = try FileHandle(forWritingTo: destination)
-            let output = Pipe()
-            let process = Process()
-            process.executableURL = URL(fileURLWithPath: "/usr/bin/unzip")
-            process.arguments = ["-p", archiveURL.path, entry]
-            process.standardOutput = output
-            process.standardError = FileHandle.nullDevice
             do {
-                try process.run()
-                while true {
-                    let chunk = output.fileHandleForReading.readData(ofLength: 1 * 1_024 * 1_024)
-                    if chunk.isEmpty { break }
+                let status = try BoundedProcessRunner.streamStandardOutput(
+                    executableURL: URL(fileURLWithPath: "/usr/bin/unzip"),
+                    arguments: ["-p", archiveURL.path, entry],
+                    timeout: 30 * 60,
+                    chunkBytes: 1 * 1_024 * 1_024
+                ) { chunk in
                     guard Int64(chunk.count) <= maximumBytes - expandedBytes else {
-                        process.terminate()
-                        process.waitUntilExit()
                         throw ProjectArchiveError.expandedDataTooLarge
                     }
                     expandedBytes += Int64(chunk.count)
                     writer.write(chunk)
                 }
-                process.waitUntilExit()
-                guard process.terminationStatus == 0 else { throw ProjectImportError.invalidArchive }
+                guard status == 0 else { throw ProjectImportError.invalidArchive }
                 try writer.close()
             } catch {
                 try? writer.close()
-                if process.isRunning {
-                    process.terminate()
-                    process.waitUntilExit()
-                }
                 try? manager.removeItem(at: destination)
                 throw error
             }
@@ -1363,6 +1455,7 @@ final class NativeBridge: NSObject, WKScriptMessageHandler {
 
     private static func sanitizedPersistedState(_ state: Any?) -> [String: Any]? {
         guard var dictionary = state as? [String: Any] else { return nil }
+        guard (try? PersistedStatePolicy.validate(dictionary)) != nil else { return nil }
         let projects = (dictionary["projects"] as? [[String: Any]] ?? []).prefix(500).map { project in
             var safeProject = project
             safeProject["poster"] = Self.safePosterPath(project["poster"] as? String)
@@ -1551,6 +1644,7 @@ final class NativeBridge: NSObject, WKScriptMessageHandler {
         case unsupportedFormat
         case archiveTooLarge
         case storageUnavailable
+        case insufficientSpace
 
         var errorDescription: String? {
             switch self {
@@ -1560,6 +1654,7 @@ final class NativeBridge: NSObject, WKScriptMessageHandler {
             case .unsupportedFormat: return "Cette version du format .cinecrique n’est pas prise en charge."
             case .archiveTooLarge: return "L’archive .cinecrique dépasse la limite de 50 Go."
             case .storageUnavailable: return "Le média intégré ne peut pas être copié dans le stockage local."
+            case .insufficientSpace: return "L’espace disque disponible est insuffisant pour décompresser ce projet."
             }
         }
     }

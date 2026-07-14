@@ -74,8 +74,10 @@ import {
   moveProject,
   removeProject,
   renameProject,
+  resolveImportedProjectState,
   setProjectArchived,
 } from "./project.js";
+import { OrderedSaveQueue } from "./persistence.js";
 import { safeExternalURL } from "./security.js";
 import { normalizeProjectCover, projectCoverImage, projectCoverText } from "./covers.js";
 import {
@@ -331,6 +333,21 @@ function browserCoverDataURL(file) {
     };
     reader.readAsDataURL(file);
   });
+}
+
+function persistableMigratedState(state) {
+  return {
+    version: 6,
+    projects: (state.projects || []).map(withoutMediaRuntime),
+    activeProjectId: state.activeProjectId ?? null,
+    documents: state.documents || {},
+    preferences: {
+      leftPanel: state.preferences?.leftPanel ?? 57,
+      projectRailCollapsed: Boolean(state.preferences?.projectRailCollapsed),
+      muted: Boolean(state.preferences?.muted),
+      shortcuts: normalizeShortcuts(state.preferences?.shortcuts),
+    },
+  };
 }
 
 function AnnotationCanvas({
@@ -1160,6 +1177,8 @@ export function App() {
   const [projectRailCollapsed, setProjectRailCollapsed] = useState(false);
   const [archivesOpen, setArchivesOpen] = useState(false);
   const [projectMenu, setProjectMenu] = useState(null);
+  const [pendingProjectImport, setPendingProjectImport] = useState(null);
+  const [importResolving, setImportResolving] = useState(false);
   const [renamingProjectId, setRenamingProjectId] = useState(null);
   const [projectNameDraft, setProjectNameDraft] = useState("");
   const [coverEditorProjectId, setCoverEditorProjectId] = useState(null);
@@ -1229,6 +1248,9 @@ export function App() {
   const thumbnailCacheRef = useRef(new Map());
   const timelineScrubRef = useRef({ pointerId: null, frame: null, pending: null });
   const persistenceTimerRef = useRef(null);
+  const persistedStateRef = useRef(null);
+  const saveQueueRef = useRef(null);
+  const browserReplacementSnapshotRef = useRef(null);
   const hydrationStartedRef = useRef(false);
   const composerTitleRef = useRef(null);
   const confirmationCancelRef = useRef(null);
@@ -1238,12 +1260,22 @@ export function App() {
   const markerMenuButtonRef = useRef(null);
   const projectMenuRef = useRef(null);
   const projectMenuButtonRef = useRef(null);
+  const importCancelRef = useRef(null);
   const projectRenameInputRef = useRef(null);
   const coverInitialFocusRef = useRef(null);
   const coverFileInputRef = useRef(null);
   const mediaPreparationCancelRef = useRef(null);
   const proxyRecoveryRef = useRef(null);
   const activeProjectIdRef = useRef(null);
+
+  if (!saveQueueRef.current) {
+    saveQueueRef.current = new OrderedSaveQueue(async (state, revision) => {
+      if (!state) return { saved: true, revision };
+      if (nativeMode) return nativeBridge.call("saveState", { state, revision });
+      localStorage.setItem("analyse-state", JSON.stringify(state));
+      return { saved: true, revision };
+    });
+  }
 
   const activeProject = selectedProject >= 0 ? projectList[selectedProject] || null : null;
   const detectedFrameRate = metadataFrameRate(fileMetadata || activeProject?.metadata, FPS);
@@ -1912,12 +1944,18 @@ export function App() {
     }
     try {
       const state = JSON.parse(await file.text());
-      applyPersistedEnvelope(state);
-      setToast("Projet Cinécrique importé");
+      migratePersistedState(state, (project) => metadataFrameRate(project.metadata, FPS));
+      setPendingProjectImport({
+        name: file.name,
+        state,
+        recovered: false,
+        portable: false,
+        importToken: null,
+      });
     } catch (error) {
       setToast(`Import impossible : ${error.message}`);
     }
-  }, [applyPersistedEnvelope]);
+  }, []);
 
   const applyProjectResult = useCallback((result) => {
     if (!result || result.cancelled) return;
@@ -1926,16 +1964,18 @@ export function App() {
       return;
     }
     try {
-      applyPersistedEnvelope(result.state);
-      setToast(result.recovered
-        ? "Projet importé et migré depuis un ancien format"
-        : result.portable
-          ? "Projet portable importé avec sa vidéo"
-          : "Projet Cinécrique importé");
+      migratePersistedState(result.state, (project) => metadataFrameRate(project.metadata, FPS));
+      setPendingProjectImport({
+        name: result.name || "Projet Cinécrique",
+        state: result.state,
+        recovered: Boolean(result.recovered),
+        portable: Boolean(result.portable),
+        importToken: result.importToken || null,
+      });
     } catch (error) {
       setToast(`Import impossible : ${error.message}`);
     }
-  }, [applyPersistedEnvelope]);
+  }, []);
 
   const importProject = useCallback(async () => {
     if (!nativeMode) {
@@ -1949,6 +1989,86 @@ export function App() {
       setToast(`Import impossible : ${error.message}`);
     }
   }, [applyProjectResult, nativeMode]);
+
+  const finishPortableImport = useCallback(async (pending, discard) => {
+    if (!nativeMode || !pending?.importToken) return;
+    await nativeBridge.call(discard ? "discardImportedProject" : "commitImportedProject", {
+      importToken: pending.importToken,
+    });
+  }, [nativeMode]);
+
+  const restoreReplacementSnapshot = useCallback(async (snapshotId, browserSnapshot) => {
+    try {
+      const restored = nativeMode && snapshotId
+        ? await nativeBridge.call("restoreStateSnapshot", { snapshotId })
+        : browserSnapshot;
+      if (!restored) throw new Error("Aucun snapshot restaurable.");
+      const migrated = applyPersistedEnvelope(restored);
+      await saveNow(persistableMigratedState(migrated));
+      setToast("Workspace restauré");
+    } catch (error) {
+      setToast(`Restauration impossible : ${error.message}`);
+    }
+  }, [applyPersistedEnvelope, nativeMode, saveNow]);
+
+  const cancelProjectImport = useCallback(async () => {
+    const pending = pendingProjectImport;
+    if (!pending) return;
+    setImportResolving(true);
+    try {
+      await finishPortableImport(pending, true);
+      setPendingProjectImport(null);
+      setToast("Import annulé");
+    } catch (error) {
+      setToast(`Annulation impossible : ${error.message}`);
+    } finally {
+      setImportResolving(false);
+    }
+  }, [finishPortableImport, pendingProjectImport]);
+
+  const resolveProjectImport = useCallback(async (mode) => {
+    const pending = pendingProjectImport;
+    if (!pending || !["merge", "replace"].includes(mode)) return;
+    setImportResolving(true);
+    try {
+      const currentState = persistedStateRef.current || persistedState;
+      let snapshotId = null;
+      let browserSnapshot = null;
+      if (mode === "replace") {
+        await saveNow(currentState);
+        if (nativeMode) {
+          const snapshot = await nativeBridge.call("createStateSnapshot");
+          snapshotId = snapshot?.snapshotId || null;
+        } else {
+          browserSnapshot = currentState;
+          browserReplacementSnapshotRef.current = currentState;
+        }
+      }
+      const nextState = resolveImportedProjectState(
+        mode,
+        currentState,
+        pending.state,
+        (project) => metadataFrameRate(project.metadata, FPS),
+      ).state;
+      const persistable = persistableMigratedState(nextState);
+      await finishPortableImport(pending, false);
+      await saveNow(persistable);
+      const runtimeState = nativeMode ? await nativeBridge.call("loadState") : nextState;
+      applyPersistedEnvelope(runtimeState || persistable);
+      setPendingProjectImport(null);
+      setToast(mode === "merge"
+        ? "Projet fusionné au workspace"
+        : {
+          message: "Workspace remplacé",
+          actionLabel: "Restaurer",
+          action: () => void restoreReplacementSnapshot(snapshotId, browserSnapshot || browserReplacementSnapshotRef.current),
+        });
+    } catch (error) {
+      setToast(`Import impossible : ${error.message}`);
+    } finally {
+      setImportResolving(false);
+    }
+  }, [applyPersistedEnvelope, finishPortableImport, nativeMode, pendingProjectImport, persistedState, restoreReplacementSnapshot, saveNow]);
 
   const openExternal = async (url) => {
     const safeURL = safeExternalURL(url);
@@ -2256,15 +2376,16 @@ export function App() {
     preferences: { leftPanel, projectRailCollapsed, muted: isMuted, shortcuts },
   }), [activeProject?.id, currentDocument, documents, isMuted, leftPanel, projectList, projectRailCollapsed, shortcuts]);
 
-  const saveNow = useCallback(async () => {
-    if (!hydrated) return;
+  const saveNow = useCallback(async (state) => {
+    if (!hydrated) return { saved: false, revision: 0 };
     try {
-      if (nativeMode) await nativeBridge.call("saveState", { state: persistedState });
-      else localStorage.setItem("analyse-state", JSON.stringify(persistedState));
+      window.clearTimeout(persistenceTimerRef.current);
+      return state === undefined ? await saveQueueRef.current.flush() : await saveQueueRef.current.flush(state);
     } catch (error) {
       setToast(error.message);
+      throw error;
     }
-  }, [hydrated, nativeMode, persistedState]);
+  }, [hydrated]);
 
   const handleMediaPreparation = useCallback((detail) => {
     if (!detail?.operationId) return;
@@ -2301,10 +2422,33 @@ export function App() {
 
   useEffect(() => {
     if (!hydrated) return undefined;
+    persistedStateRef.current = persistedState;
+    saveQueueRef.current.markDirty(persistedState);
     window.clearTimeout(persistenceTimerRef.current);
     persistenceTimerRef.current = window.setTimeout(saveNow, 700);
     return () => window.clearTimeout(persistenceTimerRef.current);
   }, [hydrated, persistedState, saveNow]);
+
+  useEffect(() => {
+    persistedStateRef.current = persistedState;
+  }, [persistedState]);
+
+  useEffect(() => {
+    window.__CINECRIQUE_FLUSH__ = async () => {
+      await saveNow();
+      return true;
+    };
+    const handleBeforeUnload = () => {
+      if (!nativeMode && persistedStateRef.current) {
+        localStorage.setItem("analyse-state", JSON.stringify(persistedStateRef.current));
+      }
+    };
+    window.addEventListener("beforeunload", handleBeforeUnload);
+    return () => {
+      delete window.__CINECRIQUE_FLUSH__;
+      window.removeEventListener("beforeunload", handleBeforeUnload);
+    };
+  }, [nativeMode, saveNow]);
 
   useEffect(() => {
     if (!nativeMode) return undefined;
@@ -2316,9 +2460,13 @@ export function App() {
       nativeBridge.on("analyse:file-rejected", (detail) => setToast(detail?.message || "Fichier non pris en charge")),
       nativeBridge.on("analyse:open-video-requested", importVideo),
       nativeBridge.on("analyse:open-subtitle-requested", importSubtitle),
-      nativeBridge.on("analyse:save-requested", () => {
-        saveNow();
-        setToast("Projet enregistré localement");
+      nativeBridge.on("analyse:save-requested", async () => {
+        try {
+          await saveNow();
+          setToast("Projet enregistré localement");
+        } catch {
+          // saveNow already reports the persistence error.
+        }
       }),
       nativeBridge.on("analyse:export-requested", () => setExportOpen(true)),
     ];
@@ -2522,7 +2670,7 @@ export function App() {
 
   useEffect(() => {
     if (!toast) return undefined;
-    const timer = window.setTimeout(() => setToast(""), 2600);
+    const timer = window.setTimeout(() => setToast(""), typeof toast === "object" && toast.action ? 7000 : 2600);
     return () => window.clearTimeout(timer);
   }, [toast]);
 
@@ -3208,6 +3356,38 @@ export function App() {
           <button type="button" role="menuitem" className="danger" onClick={requestProjectDeletion}><Trash size={16} /> Supprimer</button>
         </div>
       )}
+
+      <ModalDialog
+        open={Boolean(pendingProjectImport)}
+        onClose={() => !importResolving && void cancelProjectImport()}
+        labelledBy="project-import-title"
+        className="import-dialog"
+        initialFocusRef={importCancelRef}
+      >
+        <div className="composer-heading">
+          <div><span>Import local</span><h2 id="project-import-title">Importer ce projet ?</h2></div>
+          <AppIconButton label="Fermer" type="button" disabled={importResolving} onClick={() => void cancelProjectImport()}><X size={19} /></AppIconButton>
+        </div>
+        <p>
+          <strong>{pendingProjectImport?.name || "Projet Cinécrique"}</strong>
+          {pendingProjectImport?.portable ? " contient un média portable. " : " est prêt à être importé. "}
+          Choisissez comment l’ajouter au workspace actuel.
+        </p>
+        <div className="import-choice-grid">
+          <button ref={importCancelRef} type="button" disabled={importResolving} onClick={() => void cancelProjectImport()}>
+            <X size={17} />
+            <span><strong>Annuler</strong><small>Ne rien modifier</small></span>
+          </button>
+          <button type="button" disabled={importResolving} onClick={() => void resolveProjectImport("merge")}>
+            <Plus size={17} />
+            <span><strong>Fusionner</strong><small>Ajouter sans toucher aux projets actuels</small></span>
+          </button>
+          <button type="button" className="danger" disabled={importResolving} onClick={() => void resolveProjectImport("replace")}>
+            <ArrowCounterClockwise size={17} />
+            <span><strong>Remplacer</strong><small>Créer un snapshot avant remplacement</small></span>
+          </button>
+        </div>
+      </ModalDialog>
 
       <div className={`app-body ${projectRailCollapsed ? "rail-collapsed" : ""}`}>
         <aside className={`project-rail ${projectRailCollapsed ? "collapsed" : ""}`}>
@@ -4223,7 +4403,17 @@ export function App() {
             {tmdbError && <div className="tmdb-error" role="alert">{tmdbError}</div>}
       </ModalDialog>
 
-      {toast && <div className="toast" role="status"><Check size={16} weight="bold" /> {toast}</div>}
+      {toast && (
+        <div className="toast" role="status">
+          <Check size={16} weight="bold" />
+          <span>{typeof toast === "object" ? toast.message : toast}</span>
+          {typeof toast === "object" && toast.action && (
+            <button type="button" onClick={() => { const action = toast.action; setToast(""); action(); }}>
+              {toast.actionLabel || "Action"}
+            </button>
+          )}
+        </div>
+      )}
     </main>
   );
 }

@@ -50,28 +50,35 @@ enum ExportService {
 
     static func writeSingleText(_ file: TextFile, to destination: URL) throws {
         guard let data = file.content.data(using: .utf8) else { throw ExportError.invalidText }
-        try data.write(to: destination, options: .atomic)
+        try writeDataAtomically(data, to: destination)
     }
 
     static func copyVideo(from source: URL, to destination: URL) throws {
         let manager = FileManager.default
-        if manager.fileExists(atPath: destination.path) { try manager.removeItem(at: destination) }
-        try manager.copyItem(at: source, to: destination)
+        let sourceBytes = try fileSize(source)
+        try StorageCapacityPolicy.ensureSpace(at: destination.deletingLastPathComponent(), payloadBytes: sourceBytes)
+        let temporary = temporarySibling(for: destination)
+        do {
+            try manager.copyItem(at: source, to: temporary)
+            try replaceAtomically(temporary, destination: destination)
+        } catch {
+            try? manager.removeItem(at: temporary)
+            throw error
+        }
     }
 
     static func writeFrame(_ frame: Frame, mediaURL: URL, to destination: URL) throws {
         let png = try renderFrameData(time: frame.time, annotations: frame.annotations, mediaURL: mediaURL)
-        try png.write(to: destination, options: .atomic)
+        try writeDataAtomically(png, to: destination)
     }
 
     private static func renderFrameData(time: Double, annotations: [[String: Any]], mediaURL: URL) throws -> Data {
         let asset = AVURLAsset(url: mediaURL)
         let generator = AVAssetImageGenerator(asset: asset)
         generator.appliesPreferredTrackTransform = true
-        generator.requestedTimeToleranceBefore = CMTime(value: 1, timescale: 600)
-        generator.requestedTimeToleranceAfter = CMTime(value: 1, timescale: 600)
-        let requestedTime = CMTime(seconds: max(0, time), preferredTimescale: 600)
-        let image = try generator.copyCGImage(at: requestedTime, actualTime: nil)
+        generator.requestedTimeToleranceBefore = .zero
+        generator.requestedTimeToleranceAfter = .zero
+        let image = try copyExactImage(time: time, asset: asset, generator: generator)
         let size = NSSize(width: image.width, height: image.height)
         let composed = NSImage(size: size)
 
@@ -98,12 +105,9 @@ enum ExportService {
         let generator = AVAssetImageGenerator(asset: asset)
         generator.appliesPreferredTrackTransform = true
         generator.maximumSize = NSSize(width: maximumWidth, height: maximumWidth)
-        generator.requestedTimeToleranceBefore = CMTime(value: 1, timescale: 24)
-        generator.requestedTimeToleranceAfter = CMTime(value: 1, timescale: 24)
-        let image = try generator.copyCGImage(
-            at: CMTime(seconds: max(0, time), preferredTimescale: 600),
-            actualTime: nil
-        )
+        generator.requestedTimeToleranceBefore = .zero
+        generator.requestedTimeToleranceAfter = .zero
+        let image = try copyExactImage(time: time, asset: asset, generator: generator)
         let representation = NSBitmapImageRep(cgImage: image)
         guard let data = representation.representation(using: .jpeg, properties: [.compressionFactor: 0.78]) else {
             throw ExportError.frameRenderingFailed
@@ -174,9 +178,16 @@ enum ExportService {
         switch report.format {
         case .html:
             guard let data = html.data(using: .utf8) else { throw ExportError.invalidText }
-            try data.write(to: destination, options: .atomic)
+            try writeDataAtomically(data, to: destination)
         case .pdf:
-            try ReportPDFRenderer.write(html: html, to: destination)
+            let temporary = temporarySibling(for: destination)
+            do {
+                try ReportPDFRenderer.write(html: html, to: temporary)
+                try replaceAtomically(temporary, destination: destination)
+            } catch {
+                try? FileManager.default.removeItem(at: temporary)
+                throw error
+            }
         }
     }
 
@@ -239,7 +250,7 @@ enum ExportService {
             let bitmap = NSBitmapImageRep(data: tiff),
             let png = bitmap.representation(using: .png, properties: [:])
         else { throw ExportError.frameRenderingFailed }
-        try png.write(to: destination, options: .atomic)
+        try writeDataAtomically(png, to: destination)
     }
 
     static func writeProjectPackage(
@@ -293,16 +304,100 @@ enum ExportService {
 
     private static func archiveDirectory(_ directory: URL, keepingParent: Bool, to destination: URL) throws {
         let manager = FileManager.default
+        let estimatedBytes = try directorySize(directory)
+        try StorageCapacityPolicy.ensureSpace(at: destination.deletingLastPathComponent(), payloadBytes: estimatedBytes)
+        let temporary = temporarySibling(for: destination)
 
-        if manager.fileExists(atPath: destination.path) { try manager.removeItem(at: destination) }
         let process = Process()
         process.executableURL = URL(fileURLWithPath: "/usr/bin/ditto")
         process.arguments = ["-c", "-k", "--norsrc"]
             + (keepingParent ? ["--keepParent"] : [])
-            + [directory.path, destination.path]
-        try process.run()
-        process.waitUntilExit()
-        guard process.terminationStatus == 0 else { throw ExportError.archiveFailed }
+            + [directory.path, temporary.path]
+        do {
+            try process.run()
+            process.waitUntilExit()
+            guard process.terminationStatus == 0 else { throw ExportError.archiveFailed }
+            try replaceAtomically(temporary, destination: destination)
+        } catch {
+            try? manager.removeItem(at: temporary)
+            throw error
+        }
+    }
+
+    private static func copyExactImage(
+        time: Double,
+        asset: AVURLAsset,
+        generator: AVAssetImageGenerator
+    ) throws -> CGImage {
+        let requested = CMTime(seconds: max(0, time), preferredTimescale: 60_000)
+        var actual = CMTime.invalid
+        let image = try generator.copyCGImage(at: requested, actualTime: &actual)
+        try FrameAccuracyPolicy.validate(
+            requestedSeconds: requested.seconds,
+            actualSeconds: actual.seconds,
+            frameRate: frameRate(for: asset)
+        )
+        return image
+    }
+
+    private static func frameRate(for asset: AVURLAsset) -> Double {
+        let fps = asset.tracks(withMediaType: .video).first?.nominalFrameRate ?? 0
+        return fps > 0 ? Double(fps) : 24
+    }
+
+    private static func writeDataAtomically(_ data: Data, to destination: URL) throws {
+        try StorageCapacityPolicy.ensureSpace(
+            at: destination.deletingLastPathComponent(),
+            payloadBytes: Int64(data.count)
+        )
+        try data.write(to: destination, options: .atomic)
+    }
+
+    private static func fileSize(_ url: URL) throws -> Int64 {
+        let values = try url.resourceValues(forKeys: [.fileSizeKey, .isRegularFileKey, .isSymbolicLinkKey])
+        guard values.isRegularFile == true, values.isSymbolicLink != true, let size = values.fileSize else {
+            throw ExportError.missingMedia
+        }
+        return Int64(size)
+    }
+
+    private static func directorySize(_ directory: URL) throws -> Int64 {
+        let keys: [URLResourceKey] = [.isRegularFileKey, .isSymbolicLinkKey, .fileSizeKey]
+        guard let enumerator = FileManager.default.enumerator(
+            at: directory,
+            includingPropertiesForKeys: keys,
+            options: [.skipsHiddenFiles, .skipsPackageDescendants]
+        ) else { throw ExportError.archiveFailed }
+        var total: Int64 = 0
+        for case let url as URL in enumerator {
+            let values = try url.resourceValues(forKeys: Set(keys))
+            guard values.isSymbolicLink != true else { throw ExportError.archiveFailed }
+            if values.isRegularFile == true {
+                total += Int64(values.fileSize ?? 0)
+                guard total >= 0 else { throw ExportError.archiveFailed }
+            }
+        }
+        return total
+    }
+
+    private static func temporarySibling(for destination: URL) -> URL {
+        destination
+            .deletingLastPathComponent()
+            .appendingPathComponent(".\(destination.lastPathComponent).\(UUID().uuidString).tmp")
+    }
+
+    private static func replaceAtomically(_ temporary: URL, destination: URL) throws {
+        let manager = FileManager.default
+        if manager.fileExists(atPath: destination.path) {
+            _ = try manager.replaceItemAt(
+                destination,
+                withItemAt: temporary,
+                backupItemName: nil,
+                options: [.usingNewMetadataOnly]
+            )
+        } else {
+            try manager.moveItem(at: temporary, to: destination)
+        }
     }
 
     private static func drawComparisonImage(_ image: NSImage, in rect: NSRect) {

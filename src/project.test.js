@@ -2,11 +2,14 @@ import assert from "node:assert/strict";
 import test from "node:test";
 
 import {
+  PROJECT_DATA_LIMITS,
+  mergePersistedStates,
   migrateDocument,
   migratePersistedState,
   moveProject,
   removeProject,
   renameProject,
+  resolveImportedProjectState,
   setProjectArchived,
 } from "./project.js";
 
@@ -49,7 +52,7 @@ test("keeps an automatic marker when no note shares its frame", () => {
 
   const migrated = migrateDocument(document, 24);
   assert.deepEqual(migrated.markers.map(({ id, time, title }) => ({ id, time, title })), document.markers);
-  assert.deepEqual(migrated.annotationsByMarker, {
+  assert.deepEqual({ ...migrated.annotationsByMarker }, {
     1: [{ id: "point-1", type: "point", time: 4.5 }],
   });
   assert.equal(migrated.selectedMarkerId, document.selectedMarkerId);
@@ -201,4 +204,111 @@ test("deletes only project data and chooses the next active project", () => {
   assert.equal(result.documents.a, undefined);
   assert.equal(result.documents.b.script, "B");
   assert.equal(result.activeProjectId, "b");
+});
+
+test("rejects abusive collection sizes and truncates pencil points", () => {
+  assert.throws(() => migrateDocument({
+    markers: Array.from({ length: PROJECT_DATA_LIMITS.markersPerDocument + 1 }, (_, id) => ({ id, time: id })),
+  }), /trop de repères/);
+
+  const migrated = migrateDocument({
+    markers: [{ id: 1, time: 1, title: "Dessin" }],
+    annotationsByMarker: {
+      1: [{
+        id: "pencil",
+        type: "pencil",
+        points: Array.from({ length: PROJECT_DATA_LIMITS.pencilPoints + 12 }, (_, index) => ({ x: index / 2_000, y: 0.5 })),
+      }],
+    },
+  });
+  assert.equal(migrated.annotationsByMarker[1][0].points.length, PROJECT_DATA_LIMITS.pencilPoints);
+});
+
+test("rejects prototype-polluting and malformed imported data", () => {
+  const polluted = JSON.parse('{"version":6,"projects":[],"documents":{},"__proto__":{"polluted":true}}');
+  assert.throws(() => migratePersistedState(polluted), /clé de données non sûre/);
+  assert.equal({}.polluted, undefined);
+  assert.throws(() => migratePersistedState({
+    version: 6,
+    projects: [{ id: "film" }],
+    documents: { film: { subtitleCues: new Array(PROJECT_DATA_LIMITS.subtitleCuesPerDocument + 1).fill({}) } },
+  }), /trop de sous-titres/);
+});
+
+test("migrates a reasonably large annotation history without quadratic marker lookup", () => {
+  const count = 1_000;
+  const markers = [{ id: "note", time: 10, title: "Cadre" }];
+  const annotationsByMarker = {};
+  for (let index = 0; index < count; index += 1) {
+    const id = `auto-${index}`;
+    markers.push({ id, time: 10, title: "Annotation d’image" });
+    annotationsByMarker[id] = [{ id: `point-${index}`, type: "point" }];
+  }
+  const migrated = migrateDocument({ markers, annotationsByMarker }, 24);
+  assert.equal(migrated.markers.length, 1);
+  assert.equal(migrated.annotationsByMarker.note.length, count);
+});
+
+test("merges imports without replacing current, archived, media, or preferences", () => {
+  const merged = mergePersistedStates({
+    version: 6,
+    projects: [
+      { id: "film", title: "Courant", path: "/tmp/current.mp4" },
+      { id: "archive", title: "Archive", archived: true },
+    ],
+    activeProjectId: "film",
+    documents: { film: { analysis: "Actuelle" }, archive: { analysis: "Archivée" } },
+    preferences: { leftPanel: 63, muted: true },
+  }, {
+    version: 6,
+    projects: [{ id: "film", title: "Importé", path: "/tmp/imported.mkv" }],
+    activeProjectId: "film",
+    documents: { film: { analysis: "Importée" } },
+    preferences: { leftPanel: 44, muted: false },
+  });
+
+  assert.deepEqual(merged.projects.map(({ title }) => title), ["Courant", "Archive", "Importé"]);
+  assert.equal(merged.projects[2].id, "film-importe-2");
+  assert.equal(merged.projects[0].path, "/tmp/current.mp4");
+  assert.equal(merged.projects[2].path, "/tmp/imported.mkv");
+  assert.equal(merged.documents["film-importe-2"].analysis, "Importée");
+  assert.equal(merged.activeProjectId, "film");
+  assert.equal(merged.preferences.leftPanel, 63);
+  assert.equal(merged.preferences.muted, true);
+});
+
+test("resolves import cancellation without changing the current workspace", () => {
+  const current = {
+    version: 6,
+    projects: [{ id: "film", title: "Courant" }],
+    activeProjectId: "film",
+    documents: { film: { analysis: "Actuelle" } },
+  };
+  const result = resolveImportedProjectState("cancel", current, {
+    version: 6,
+    projects: [{ id: "import", title: "Importé" }],
+    documents: { import: { analysis: "Importée" } },
+  });
+  assert.equal(result.changed, false);
+  assert.deepEqual(result.state.projects.map((project) => project.title), ["Courant"]);
+  assert.equal(result.state.documents.film.analysis, "Actuelle");
+});
+
+test("resolves replacement with only the imported workspace", () => {
+  const result = resolveImportedProjectState("replace", {
+    version: 6,
+    projects: [{ id: "film", title: "Courant" }],
+    activeProjectId: "film",
+    documents: { film: { analysis: "Actuelle" } },
+  }, {
+    version: 6,
+    projects: [{ id: "import", title: "Importé", path: "/tmp/imported.mkv" }],
+    activeProjectId: "import",
+    documents: { import: { analysis: "Importée" } },
+  });
+  assert.equal(result.changed, true);
+  assert.deepEqual(result.state.projects.map((project) => project.title), ["Importé"]);
+  assert.equal(result.state.activeProjectId, "import");
+  assert.equal(result.state.documents.import.analysis, "Importée");
+  assert.equal(result.state.projects[0].path, "/tmp/imported.mkv");
 });

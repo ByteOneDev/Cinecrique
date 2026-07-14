@@ -32,27 +32,8 @@ public final class AppStateStore {
         stateURL = directory.appendingPathComponent("state.json")
         snapshotsDirectoryURL = directory.appendingPathComponent("Snapshots", isDirectory: true)
 
-        if fileManager.fileExists(atPath: directory.path) {
-            let values = try directory.resourceValues(forKeys: [.isDirectoryKey, .isSymbolicLinkKey])
-            guard values.isDirectory == true, values.isSymbolicLink != true else {
-                throw StoreError.unsafeLocation
-            }
-        } else {
-            try fileManager.createDirectory(
-                at: directory,
-                withIntermediateDirectories: true,
-                attributes: [.posixPermissions: 0o700]
-            )
-        }
-        try fileManager.setAttributes([.posixPermissions: 0o700], ofItemAtPath: directory.path)
-        if !fileManager.fileExists(atPath: snapshotsDirectoryURL.path) {
-            try fileManager.createDirectory(
-                at: snapshotsDirectoryURL,
-                withIntermediateDirectories: false,
-                attributes: [.posixPermissions: 0o700]
-            )
-        }
-        try fileManager.setAttributes([.posixPermissions: 0o700], ofItemAtPath: snapshotsDirectoryURL.path)
+        try ensurePrivateDirectory(directory, withIntermediateDirectories: true)
+        try ensurePrivateDirectory(snapshotsDirectoryURL, withIntermediateDirectories: false)
         if let legacyDirectory { try migrateLegacyStateIfNeeded(from: legacyDirectory) }
     }
 
@@ -93,6 +74,31 @@ public final class AppStateStore {
         stateURL.deletingLastPathComponent().path
     }
 
+    @discardableResult
+    public func createRestorableSnapshot() throws -> String? {
+        guard fileManager.fileExists(atPath: stateURL.path) else { return nil }
+        let values = try stateURL.resourceValues(forKeys: [.fileSizeKey, .isRegularFileKey, .isSymbolicLinkKey])
+        guard values.isRegularFile == true, values.isSymbolicLink != true else { throw StoreError.unsafeLocation }
+        guard let size = values.fileSize, size <= Self.maxStateBytes else { throw StoreError.stateTooLarge }
+        let data = try Data(contentsOf: stateURL)
+        guard (try JSONSerialization.jsonObject(with: data)) is [String: Any] else { throw StoreError.invalidState }
+        return try writeSnapshot(data).lastPathComponent
+    }
+
+    public func restoreSnapshot(named name: String) throws -> Any {
+        guard
+            name == URL(fileURLWithPath: name).lastPathComponent,
+            name.hasPrefix("snapshot-"),
+            name.hasSuffix(".json"),
+            name.utf8.count <= 256
+        else { throw StoreError.invalidSnapshot }
+        try validateSnapshotsDirectory()
+        let snapshotURL = snapshotsDirectoryURL.appendingPathComponent(name)
+        let state = try loadState(at: snapshotURL)
+        try save(state)
+        return state
+    }
+
     private func loadState(at url: URL) throws -> [String: Any] {
         let values = try url.resourceValues(forKeys: [.fileSizeKey, .isRegularFileKey, .isSymbolicLinkKey])
         guard values.isRegularFile == true, values.isSymbolicLink != true else { throw StoreError.invalidState }
@@ -115,16 +121,23 @@ public final class AppStateStore {
         let currentData = try Data(contentsOf: stateURL)
         guard currentData != nextData else { return }
 
+        _ = try writeSnapshot(currentData)
+    }
+
+    private func writeSnapshot(_ data: Data) throws -> URL {
+        try validateSnapshotsDirectory()
         let now = Int(Date().timeIntervalSince1970 * 1_000)
         let milliseconds = max(now, lastSnapshotMilliseconds + 1)
         lastSnapshotMilliseconds = milliseconds
         let snapshotURL = snapshotsDirectoryURL.appendingPathComponent("snapshot-\(milliseconds)-\(UUID().uuidString).json")
-        try currentData.write(to: snapshotURL, options: .atomic)
+        try data.write(to: snapshotURL, options: .atomic)
         try fileManager.setAttributes([.posixPermissions: 0o600], ofItemAtPath: snapshotURL.path)
         try pruneSnapshots()
+        return snapshotURL
     }
 
     private func snapshotURLsNewestFirst() throws -> [URL] {
+        try validateSnapshotsDirectory()
         let urls = try fileManager.contentsOfDirectory(
             at: snapshotsDirectoryURL,
             includingPropertiesForKeys: [.contentModificationDateKey, .isRegularFileKey, .isSymbolicLinkKey],
@@ -185,10 +198,32 @@ public final class AppStateStore {
         try fileManager.setAttributes([.posixPermissions: 0o600], ofItemAtPath: stateURL.path)
     }
 
+    private func ensurePrivateDirectory(_ url: URL, withIntermediateDirectories: Bool) throws {
+        if fileManager.fileExists(atPath: url.path) {
+            let values = try url.resourceValues(forKeys: [.isDirectoryKey, .isSymbolicLinkKey])
+            guard values.isDirectory == true, values.isSymbolicLink != true else {
+                throw StoreError.unsafeLocation
+            }
+        } else {
+            try fileManager.createDirectory(
+                at: url,
+                withIntermediateDirectories: withIntermediateDirectories,
+                attributes: [.posixPermissions: 0o700]
+            )
+        }
+        try fileManager.setAttributes([.posixPermissions: 0o700], ofItemAtPath: url.path)
+    }
+
+    private func validateSnapshotsDirectory() throws {
+        let values = try snapshotsDirectoryURL.resourceValues(forKeys: [.isDirectoryKey, .isSymbolicLinkKey])
+        guard values.isDirectory == true, values.isSymbolicLink != true else { throw StoreError.unsafeLocation }
+    }
+
     enum StoreError: LocalizedError {
         case invalidState
         case stateTooLarge
         case unsafeLocation
+        case invalidSnapshot
 
         var errorDescription: String? {
             switch self {
@@ -198,6 +233,8 @@ public final class AppStateStore {
                 return "L’état du projet dépasse la limite de 32 Mo."
             case .unsafeLocation:
                 return "L’emplacement de sauvegarde local n’est pas sûr."
+            case .invalidSnapshot:
+                return "Le snapshot demandé est invalide."
             }
         }
     }
