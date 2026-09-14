@@ -98,5 +98,5 @@ Première version publiée. Atelier macOS local d’analyse filmique, image par 
 - Enrichissement TMDB facultatif, jeton stocké dans le Trousseau macOS.
 - Couvertures de projet : image locale, affiche TMDB, image courante, texte ou marque Cinécrique.
 
-[1.1.0]: https://github.com/Matt0967/Cinecrique/releases/tag/v1.1.0
-[1.0.0]: https://github.com/Matt0967/Cinecrique/releases/tag/v1.0.0
+[1.1.0]: https://github.com/ByteOneDev/Cinecrique/releases/tag/v1.1.0
+[1.0.0]: https://github.com/ByteOneDev/Cinecrique/releases/tag/v1.0.0
