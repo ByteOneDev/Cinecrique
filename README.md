@@ -80,7 +80,10 @@ Un export unique produit directement le fichier choisi. Plusieurs éléments son
 - `design` : captures et notes de comparaison visuelle du prototype, sans lien avec le code exécuté ;
 - `docs` : page de présentation publiée sur GitHub Pages, indépendante de l’application.
 
-Les mentions et conditions des composants tiers sont décrites dans [`THIRD_PARTY_NOTICES.md`](THIRD_PARTY_NOTICES.md).
-La revue de sécurité du projet est consignée dans [`AUDIT-SECURITE.md`](AUDIT-SECURITE.md).
+L’historique des versions est consigné dans [`CHANGELOG.md`](CHANGELOG.md). Les mentions et
+conditions des composants tiers sont décrites dans
+[`THIRD_PARTY_NOTICES.md`](THIRD_PARTY_NOTICES.md). La revue de sécurité du code est publiée dans
+[`AUDIT-SECURITE.md`](AUDIT-SECURITE.md), et la procédure de signalement dans
+[`SECURITY.md`](SECURITY.md).
 
 La couche d’interface reste web et portable afin de préparer une future version Windows/Linux, tandis que les accès fichiers et services système sont isolés derrière le pont natif macOS.
