@@ -1,7 +1,9 @@
 .DS_Store
 .build/
+.claude/
 .npm-cache/
 node_modules/
 dist/
 web-dist/
+output/
 *.sample.txt

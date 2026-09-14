@@ -1,27 +1,29 @@
 {
   "name": "cinecrique",
-  "version": "1.0.0",
+  "version": "1.1.0",
   "private": true,
   "type": "module",
   "scripts": {
     "dev": "vite",
     "build": "vite build",
-    "test": "node --test src/*.test.js",
-    "media:check": "./script/check_media_proxy.sh",
+    "test": "node --test test/web/*.test.js",
+    "media:check": "./scripts/check_media_proxy.sh",
     "preview": "vite preview",
-    "macos:ffmpeg": "./script/build_ffmpeg_tools.sh",
-    "macos:build": "./script/build_and_run.sh --build",
-    "macos:dmg": "./script/create_dmg.sh",
-    "macos:notarize": "./script/notarize_dmg.sh",
-    "release:check": "./script/check_release.sh",
-    "macos:run": "./script/build_and_run.sh",
-    "macos:verify": "./script/build_and_run.sh --verify"
+    "macos:ffmpeg": "./scripts/build_ffmpeg_tools.sh",
+    "macos:build": "./scripts/build_and_run.sh --build",
+    "macos:dmg": "./scripts/create_dmg.sh",
+    "macos:notarize": "./scripts/notarize_dmg.sh",
+    "release:check": "./scripts/check_release.sh",
+    "macos:run": "./scripts/build_and_run.sh",
+    "macos:verify": "./scripts/build_and_run.sh --verify"
   },
   "dependencies": {
     "@phosphor-icons/react": "^2.1.10",
-    "@vitejs/plugin-react": "5.0.4",
     "react": "19.2.0",
-    "react-dom": "19.2.0",
+    "react-dom": "19.2.0"
+  },
+  "devDependencies": {
+    "@vitejs/plugin-react": "5.0.4",
     "vite": "^6.4.3"
   }
 }

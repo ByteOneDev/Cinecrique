@@ -13,7 +13,7 @@ npm install
 npm run macos:run
 ```
 
-Le bouton **Run** de Codex exécute le même script : [`script/build_and_run.sh`](script/build_and_run.sh).
+Le bouton **Run** de Codex exécute le même script : [`scripts/build_and_run.sh`](scripts/build_and_run.sh).
 
 Commandes utiles :
 
@@ -44,6 +44,7 @@ Les artefacts générés se trouvent dans `dist/` : application, ZIP, DMG, check
 - bibliothèque de projets repliable, sauvegarde automatique et dix snapshots locaux ;
 - détection et reliaison des médias déplacés sans perte de l’analyse ;
 - export sélectif du scénario, de l’analyse, des repères, des sous-titres, des métadonnées, de la vidéo et des images annotées ;
+- studio d’extraits en second mode : points A/B au timecode exact, extraits MP4 ou GIF, images fixes PNG ou JPEG, panier d’extraits et filigrane de citation désactivable ;
 - export et réimport d’un projet Cinécrique complet, avec migration des anciens formats ;
 - éditeur Notes en Markdown et éditeur Scénario en Fountain, tous deux en JetBrains Mono ;
 - enrichissement TMDB facultatif dans la langue choisie.
@@ -66,12 +67,20 @@ Un export unique produit directement le fichier choisi. Plusieurs éléments son
 
 ## Architecture
 
-- `macOS/Sources/Analyse` : coque AppKit de Cinécrique, WKWebView, menus natifs, streaming local, Trousseau et TMDB ;
-- `macOS/Sources/AnalyseCore` : logique Swift testable du streaming par plages d’octets et de la sauvegarde locale ;
-- `src` : interface React et logique du lecteur, des notes, des sous-titres et de l’éditeur ;
-- `script/build_and_run.sh` : build web, build SwiftPM, vérifications, signature et lancement.
-- `script/build_ffmpeg_tools.sh` : compilation reproductible des outils FFmpeg LGPL utilisés pour les proxies locaux.
+- `source/macos/Analyse` : coque AppKit de Cinécrique, WKWebView, menus natifs, streaming local, Trousseau et TMDB ;
+- `source/macos/AnalyseCore` : logique Swift testable du streaming par plages d’octets et de la sauvegarde locale ;
+- `source/web` : interface React et logique du lecteur, des notes, des sous-titres et de l’éditeur ;
+- `test/web` : tests unitaires Node du code React/JS (`node --test`) ;
+- `test/fixtures` : médias d’exemple pour des vérifications manuelles ;
+- `checks/AnalyseCoreChecks` : suite de vérifications Swift exécutables pour `AnalyseCore` (`npm run macos:verify`) ;
+- vérifications intégrées au binaire livré : `--check-media-proxy`, `--check-exact-frame` et `--check-window-drag`, toutes exécutées par `npm run release:check` ;
+- `resources/macos` : icônes, `Info.plist` et mentions embarquées dans l’application ;
+- `scripts/build_and_run.sh` : build web, build SwiftPM, vérifications, signature et lancement.
+- `scripts/build_ffmpeg_tools.sh` : compilation reproductible des outils FFmpeg LGPL utilisés pour les proxies locaux.
+- `design` : captures et notes de comparaison visuelle du prototype, sans lien avec le code exécuté ;
+- `docs` : page de présentation publiée sur GitHub Pages, indépendante de l’application.
 
 Les mentions et conditions des composants tiers sont décrites dans [`THIRD_PARTY_NOTICES.md`](THIRD_PARTY_NOTICES.md).
+La revue de sécurité du projet est consignée dans [`AUDIT-SECURITE.md`](AUDIT-SECURITE.md).
 
 La couche d’interface reste web et portable afin de préparer une future version Windows/Linux, tandis que les accès fichiers et services système sont isolés derrière le pont natif macOS.

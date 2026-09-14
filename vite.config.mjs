@@ -14,7 +14,7 @@ export default defineConfig({
     host: "0.0.0.0",
     allowedHosts: ["terminal.local"],
     warmup: {
-      clientFiles: ["./src/main.jsx"],
+      clientFiles: ["./source/web/main.jsx"],
     },
   },
   plugins: [react()],

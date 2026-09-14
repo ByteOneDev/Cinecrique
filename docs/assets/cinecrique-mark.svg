@@ -1,0 +1,8 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" role="img" aria-labelledby="title">
+  <title id="title">Cinécrique</title>
+  <rect width="64" height="64" rx="14" fill="#0b1013"/>
+  <path d="M43 14H25c-7 0-12 5-12 12v12c0 7 5 12 12 12h18" fill="none" stroke="#edf0ef" stroke-width="5" stroke-linecap="round"/>
+  <path d="M38 20v24" fill="none" stroke="#d8a432" stroke-width="3" stroke-linecap="round"/>
+  <circle cx="38" cy="32" r="5" fill="#e14f48" stroke="#0b1013" stroke-width="2"/>
+  <path d="m47 25 7 7-7 7" fill="none" stroke="#edf0ef" stroke-width="4" stroke-linecap="round" stroke-linejoin="round"/>
+</svg>

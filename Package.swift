@@ -14,12 +14,12 @@ let package = Package(
     targets: [
         .target(
             name: "AnalyseCore",
-            path: "macOS/Sources/AnalyseCore"
+            path: "source/macos/AnalyseCore"
         ),
         .executableTarget(
             name: "Cinecrique",
             dependencies: ["AnalyseCore"],
-            path: "macOS/Sources/Analyse",
+            path: "source/macos/Analyse",
             linkerSettings: [
                 .linkedFramework("AppKit"),
                 .linkedFramework("AVFoundation"),
@@ -31,7 +31,7 @@ let package = Package(
         .executableTarget(
             name: "AnalyseCoreChecks",
             dependencies: ["AnalyseCore"],
-            path: "macOS/Checks/AnalyseCoreChecks"
+            path: "checks/AnalyseCoreChecks"
         )
     ]
 )

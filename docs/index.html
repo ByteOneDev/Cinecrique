@@ -1,0 +1,605 @@
+<!doctype html>
+<html lang="fr">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Cinécrique — Analyse filmique, image par image</title>
+<meta name="description" content="L’atelier macOS local pour analyser, annoter et réécrire films et séries, et en extraire des images et des séquences prêtes à publier.">
+<meta name="color-scheme" content="dark">
+<link rel="icon" href="./assets/cinecrique-mark.svg" type="image/svg+xml">
+<meta property="og:title" content="Cinécrique — Analyse filmique, image par image">
+<meta property="og:description" content="L’atelier macOS local pour analyser, annoter et réécrire films et séries.">
+<meta property="og:type" content="website">
+<style>
+  :root {
+    --bg: #080b0d;
+    --surface: #0c1114;
+    --surface-2: #10161a;
+    --line: #212a30;
+    --line-soft: #192025;
+    --text: #e9ecec;
+    --muted: #98a3a8;
+    --subtle: #6d787e;
+    --gold: #e0a63a;
+    --gold-deep: #8f6a28;
+    --green: #8bb862;
+    --mono: ui-monospace, SFMono-Regular, "SF Mono", Menlo, monospace;
+    --sans: -apple-system, BlinkMacSystemFont, "SF Pro Text", "Segoe UI", Inter, system-ui, sans-serif;
+  }
+
+  * { box-sizing: border-box; }
+
+  html { scroll-behavior: smooth; }
+
+  body {
+    margin: 0;
+    color: var(--text);
+    background: var(--bg);
+    font-family: var(--sans);
+    font-size: 16px;
+    line-height: 1.6;
+    -webkit-font-smoothing: antialiased;
+  }
+
+  a { color: var(--gold); text-decoration: none; }
+  a:hover { text-decoration: underline; }
+  img { max-width: 100%; display: block; }
+
+  :focus-visible { outline: 2px solid var(--gold); outline-offset: 3px; border-radius: 4px; }
+
+  .wrap { width: min(1080px, calc(100% - 48px)); margin-inline: auto; }
+
+  /* En-tête */
+  .topbar {
+    position: sticky;
+    top: 0;
+    z-index: 10;
+    background: rgba(8, 11, 13, 0.86);
+    backdrop-filter: blur(12px);
+    border-bottom: 1px solid var(--line-soft);
+  }
+
+  .topbar .wrap {
+    height: 62px;
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 20px;
+  }
+
+  .brand { display: flex; align-items: center; gap: 11px; }
+  .brand img { width: 30px; height: 30px; }
+  .brand strong { font-size: 16px; font-weight: 600; letter-spacing: -0.01em; }
+  .brand span { color: var(--subtle); font-size: 12px; }
+
+  .topnav { display: flex; align-items: center; gap: 22px; }
+  .topnav a { color: var(--muted); font-size: 14px; }
+  .topnav a:hover { color: var(--text); text-decoration: none; }
+
+  /* Boutons */
+  .button {
+    display: inline-flex;
+    align-items: center;
+    gap: 9px;
+    height: 44px;
+    padding: 0 20px;
+    border-radius: 7px;
+    font-size: 14.5px;
+    font-weight: 560;
+    border: 1px solid transparent;
+    white-space: nowrap;
+  }
+
+  .button.primary { color: #17130a; background: var(--gold); border-color: #efb951; }
+  .button.primary:hover { background: #eeb44b; text-decoration: none; }
+  .button.ghost { color: var(--text); background: var(--surface-2); border-color: #2f3940; }
+  .button.ghost:hover { background: #171e23; text-decoration: none; }
+
+  /* Héros */
+  .hero { padding: 84px 0 64px; border-bottom: 1px solid var(--line-soft); }
+
+  .eyebrow {
+    display: inline-flex;
+    align-items: center;
+    gap: 8px;
+    margin-bottom: 22px;
+    padding: 5px 12px;
+    color: var(--gold);
+    background: rgba(224, 166, 58, 0.09);
+    border: 1px solid rgba(224, 166, 58, 0.26);
+    border-radius: 999px;
+    font-size: 12px;
+    font-weight: 560;
+    letter-spacing: 0.02em;
+  }
+
+  .hero h1 {
+    max-width: 15ch;
+    margin: 0 0 20px;
+    font-size: clamp(38px, 6vw, 62px);
+    font-weight: 620;
+    line-height: 1.06;
+    letter-spacing: -0.028em;
+  }
+
+  .hero h1 em { font-style: normal; color: var(--gold); }
+
+  .lede {
+    max-width: 58ch;
+    margin: 0 0 32px;
+    color: var(--muted);
+    font-size: clamp(16.5px, 1.7vw, 19px);
+    line-height: 1.62;
+  }
+
+  .cta { display: flex; flex-wrap: wrap; align-items: center; gap: 12px; }
+  .cta-note { width: 100%; margin: 14px 0 0; color: var(--subtle); font-size: 13px; }
+  .cta-note code { font-family: var(--mono); font-size: 12.5px; color: var(--muted); }
+
+  /* Fenêtre d’aperçu */
+  .showcase { margin-top: 58px; }
+
+  .window {
+    background: var(--surface);
+    border: 1px solid var(--line);
+    border-radius: 12px;
+    overflow: hidden;
+    box-shadow: 0 40px 90px rgba(0, 0, 0, 0.55);
+  }
+
+  .window-bar {
+    display: flex;
+    align-items: center;
+    gap: 14px;
+    height: 42px;
+    padding: 0 14px;
+    background: #0a0e11;
+    border-bottom: 1px solid var(--line);
+  }
+
+  .dots { display: flex; gap: 7px; }
+  .dots i { width: 11px; height: 11px; border-radius: 50%; display: block; }
+  .dots i:nth-child(1) { background: #ff6159; }
+  .dots i:nth-child(2) { background: #ffbd2e; }
+  .dots i:nth-child(3) { background: #28c940; }
+  .window-bar span { color: var(--subtle); font-size: 12px; }
+  .window-bar .tag { margin-left: auto; color: var(--gold); font-family: var(--mono); font-size: 11px; }
+
+  .stage { position: relative; background: #05080a; }
+  .stage img { width: 100%; height: auto; }
+
+  .stage-mark {
+    position: absolute;
+    left: 3.4%;
+    bottom: 8%;
+    display: grid;
+    gap: 4px;
+    max-width: 62%;
+    padding: 12px 15px;
+    background: rgba(4, 6, 7, 0.5);
+    border-radius: 6px;
+  }
+
+  .stage-mark b { color: #f8fafa; font-size: clamp(12px, 1.7vw, 19px); font-weight: 500; }
+  .stage-mark s { color: var(--gold); font-size: clamp(10px, 1.4vw, 15px); font-weight: 600; text-decoration: none; }
+  .stage-mark u { color: #ced4d6; font-family: var(--mono); font-size: clamp(9px, 1.2vw, 13px); text-decoration: none; }
+
+  .stage-timeline {
+    display: flex;
+    align-items: center;
+    gap: 14px;
+    padding: 12px 16px;
+    background: var(--surface);
+    border-top: 1px solid var(--line);
+  }
+
+  .stage-timeline .tc { color: var(--gold); font-family: var(--mono); font-size: 12px; white-space: nowrap; }
+  .stage-timeline .track { position: relative; flex: 1; height: 5px; background: #1b2227; border-radius: 3px; }
+  .stage-timeline .track i { position: absolute; left: 18%; width: 34%; height: 100%; background: rgba(224, 166, 58, 0.55); border-radius: 3px; display: block; }
+  .stage-timeline .track b { position: absolute; left: 18%; top: -4px; width: 2px; height: 13px; background: var(--gold); display: block; }
+
+  /* Sections */
+  section { padding: 78px 0; border-bottom: 1px solid var(--line-soft); }
+
+  h2 {
+    margin: 0 0 12px;
+    font-size: clamp(26px, 3.4vw, 34px);
+    font-weight: 620;
+    letter-spacing: -0.02em;
+  }
+
+  .section-lede { max-width: 62ch; margin: 0 0 40px; color: var(--muted); font-size: 16.5px; }
+
+  .kicker {
+    margin: 0 0 10px;
+    color: var(--gold);
+    font-family: var(--mono);
+    font-size: 12px;
+    letter-spacing: 0.08em;
+    text-transform: uppercase;
+  }
+
+  /* Deux modes */
+  .modes { display: grid; grid-template-columns: repeat(auto-fit, minmax(320px, 1fr)); gap: 20px; }
+
+  .mode {
+    padding: 26px;
+    background: var(--surface);
+    border: 1px solid var(--line);
+    border-radius: 10px;
+  }
+
+  .mode h3 { margin: 0 0 8px; font-size: 20px; font-weight: 600; }
+  .mode > p { margin: 0 0 18px; color: var(--muted); font-size: 15px; }
+  .mode ul { margin: 0; padding: 0; list-style: none; display: grid; gap: 10px; }
+
+  .mode li {
+    display: grid;
+    grid-template-columns: 18px 1fr;
+    gap: 11px;
+    color: #c5cccf;
+    font-size: 14.5px;
+    line-height: 1.5;
+  }
+
+  .mode li::before { content: "→"; color: var(--gold-deep); font-family: var(--mono); }
+
+  .mode-badge {
+    display: inline-block;
+    margin-bottom: 14px;
+    padding: 4px 10px;
+    border-radius: 5px;
+    font-family: var(--mono);
+    font-size: 11px;
+    letter-spacing: 0.04em;
+  }
+
+  .mode-badge.one { color: #b9c3c7; background: #161d21; border: 1px solid #2b343a; }
+  .mode-badge.two { color: var(--gold); background: rgba(224, 166, 58, 0.1); border: 1px solid rgba(224, 166, 58, 0.3); }
+
+  /* Grille de fonctions */
+  .grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(258px, 1fr)); gap: 1px; background: var(--line-soft); border: 1px solid var(--line-soft); border-radius: 10px; overflow: hidden; }
+
+  .cell { padding: 24px; background: var(--surface); }
+  .cell h3 { margin: 0 0 8px; font-size: 16px; font-weight: 600; }
+  .cell p { margin: 0; color: var(--muted); font-size: 14.5px; line-height: 1.55; }
+  .cell .num { display: block; margin-bottom: 14px; color: var(--gold-deep); font-family: var(--mono); font-size: 12px; }
+
+  /* Confidentialité */
+  .privacy { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); gap: 44px; align-items: start; }
+
+  .claims { margin: 0; padding: 0; list-style: none; display: grid; gap: 16px; }
+  .claims li { display: grid; grid-template-columns: 22px 1fr; gap: 12px; font-size: 15px; line-height: 1.55; }
+  .claims li::before { content: "✓"; color: var(--green); font-weight: 700; }
+  .claims strong { display: block; }
+  .claims span { color: var(--muted); font-size: 14px; }
+
+  .panel {
+    padding: 22px;
+    background: var(--surface-2);
+    border: 1px solid var(--line);
+    border-radius: 10px;
+    font-family: var(--mono);
+    font-size: 13px;
+    line-height: 1.75;
+    color: var(--muted);
+    overflow-x: auto;
+  }
+
+  .panel b { color: var(--text); font-weight: 500; }
+  .panel .c { color: var(--subtle); }
+
+  /* Spécifications */
+  .specs { display: grid; grid-template-columns: repeat(auto-fit, minmax(210px, 1fr)); gap: 26px; }
+  .spec dt { margin-bottom: 5px; color: var(--subtle); font-family: var(--mono); font-size: 11px; letter-spacing: 0.06em; text-transform: uppercase; }
+  .spec dd { margin: 0; font-size: 14.5px; color: #cdd4d7; line-height: 1.55; }
+
+  /* Installation */
+  .steps { counter-reset: step; display: grid; gap: 14px; margin: 0; padding: 0; list-style: none; }
+
+  .steps li {
+    counter-increment: step;
+    display: grid;
+    grid-template-columns: 30px 1fr;
+    gap: 16px;
+    align-items: baseline;
+    padding: 16px 18px;
+    background: var(--surface);
+    border: 1px solid var(--line);
+    border-radius: 8px;
+  }
+
+  .steps li::before {
+    content: counter(step);
+    color: var(--gold);
+    font-family: var(--mono);
+    font-size: 13px;
+  }
+
+  .steps p { margin: 0 0 8px; font-size: 15px; }
+  .steps p:last-child { margin-bottom: 0; }
+  .steps code { display: block; padding: 9px 12px; background: #0a0f12; border: 1px solid var(--line-soft); border-radius: 5px; color: #cfd6d9; font-family: var(--mono); font-size: 13px; overflow-x: auto; }
+
+  /* Pied de page */
+  footer { padding: 46px 0 60px; }
+  .footer-row { display: flex; flex-wrap: wrap; gap: 20px; justify-content: space-between; align-items: center; }
+  .footer-row p { margin: 0; color: var(--subtle); font-size: 13.5px; }
+  .footer-links { display: flex; flex-wrap: wrap; gap: 20px; }
+  .footer-links a { color: var(--muted); font-size: 13.5px; }
+
+  @media (max-width: 780px) {
+    .topnav { display: none; }
+    .hero { padding: 56px 0 44px; }
+    section { padding: 56px 0; }
+    .privacy { grid-template-columns: 1fr; gap: 30px; }
+  }
+
+  @media (prefers-reduced-motion: reduce) {
+    html { scroll-behavior: auto; }
+  }
+</style>
+</head>
+<body>
+
+<header class="topbar">
+  <div class="wrap">
+    <div class="brand">
+      <img src="./assets/cinecrique-mark.svg" alt="">
+      <div>
+        <strong>Cinécrique</strong>
+        <span>&nbsp;· macOS</span>
+      </div>
+    </div>
+    <nav class="topnav" aria-label="Sections">
+      <a href="#modes">Les deux modes</a>
+      <a href="#fonctions">Fonctions</a>
+      <a href="#confidentialite">Confidentialité</a>
+      <a href="#installer">Installer</a>
+    </nav>
+    <a class="button ghost" href="https://github.com/Matt0967/Cinecrique">Code source</a>
+  </div>
+</header>
+
+<main>
+  <div class="hero">
+    <div class="wrap">
+      <span class="eyebrow">Application macOS locale · version 1.1</span>
+      <h1>Analyse filmique, <em>image par image</em>.</h1>
+      <p class="lede">
+        Cinécrique est un atelier local pour analyser, annoter et réécrire films et séries — puis en
+        extraire l’image ou la séquence exacte dont votre vidéo a besoin. Vos fichiers restent sur
+        votre Mac, du premier repère au fichier exporté.
+      </p>
+      <div class="cta">
+        <a class="button primary" href="https://github.com/Matt0967/Cinecrique/releases">Télécharger pour macOS</a>
+        <a class="button ghost" href="https://github.com/Matt0967/Cinecrique">Voir le projet</a>
+        <p class="cta-note">
+          macOS 13 ou supérieur · Apple Silicon et Intel · DMG signé accompagné de son empreinte <code>SHA-256</code>.
+        </p>
+      </div>
+
+      <div class="showcase">
+        <div class="window">
+          <div class="window-bar">
+            <div class="dots" aria-hidden="true"><i></i><i></i><i></i></div>
+            <span>Studio d’extraits — aperçu du filigrane de citation</span>
+            <span class="tag">LOCAL</span>
+          </div>
+          <div class="stage">
+            <img src="./assets/frame-apercu.jpg" width="1400" height="788"
+                 alt="Image d’un film affichée dans le studio d’extraits, avec une citation incrustée en bas à gauche.">
+            <div class="stage-mark">
+              <b>« Ce n’est pas le mépris. C’est l’indifférence. »</b>
+              <s>« Le Mépris » · 1963</s>
+              <u>01:12:34:18</u>
+            </div>
+          </div>
+          <div class="stage-timeline">
+            <span class="tc">01:12:34:18</span>
+            <div class="track" aria-hidden="true"><i></i><b></b></div>
+            <span class="tc">A → B · 00:00:06:00</span>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <section id="modes">
+    <div class="wrap">
+      <p class="kicker">Deux ateliers, un seul projet</p>
+      <h2>Analyser en profondeur, extraire au bon plan</h2>
+      <p class="section-lede">
+        Les deux modes partagent le même projet, les mêmes repères timecodés et le même fichier
+        d’origine. Un bouton dans la barre supérieure bascule de l’un à l’autre.
+      </p>
+      <div class="modes">
+        <article class="mode">
+          <span class="mode-badge one">ATELIER D’ANALYSE</span>
+          <h3>Lire, annoter, écrire</h3>
+          <p>La table de travail complète pour décortiquer un film ou un épisode.</p>
+          <ul>
+            <li>Lecture image par image, boucle A/B, vitesses variables et navigation J/K/L.</li>
+            <li>Repères timecodés en points ou en plages, avec notes, liens, tags et signets.</li>
+            <li>Annotations sur l’image : note, flèche, rectangle, point numéroté, crayon.</li>
+            <li>Scénario en Fountain avec complétion contextuelle, notes en Markdown.</li>
+            <li>Transcription des sous-titres, table des plans, comparaison de deux images.</li>
+            <li>Rapports HTML ou PDF sélectifs, export de projet complet et réimport.</li>
+          </ul>
+        </article>
+        <article class="mode">
+          <span class="mode-badge two">STUDIO D’EXTRAITS · NOUVEAU</span>
+          <h3>Extraire et publier</h3>
+          <p>Le second mode, pensé pour alimenter une vidéo, un cours ou un article.</p>
+          <ul>
+            <li>Points A et B au timecode exact, ou reprise directe d’un repère existant.</li>
+            <li>Extraits MP4 en H.264 ou GIF en boucle, de la définition source au 480p.</li>
+            <li>Images fixes PNG ou JPEG récupérées à la frame près.</li>
+            <li>Filigrane de citation optionnel : réplique, attribution et timecode incrustés.</li>
+            <li>Le filigrane se désactive d’un clic : l’extrait sort alors sans surimpression.</li>
+            <li>Panier d’extraits pour préparer une série de plans et tout exporter d’un coup.</li>
+          </ul>
+        </article>
+      </div>
+    </div>
+  </section>
+
+  <section id="fonctions">
+    <div class="wrap">
+      <p class="kicker">Ce qui tourne sous le capot</p>
+      <h2>Une chaîne média entièrement locale</h2>
+      <p class="section-lede">
+        Cinécrique embarque ses propres outils média : rien à installer à côté, rien à envoyer
+        ailleurs.
+      </p>
+      <div class="grid">
+        <div class="cell">
+          <span class="num">01</span>
+          <h3>Timecode professionnel</h3>
+          <p>23,976 à 30 i/s, décalage de départ et gestion du drop-frame 29,97. L’affichage change, jamais les données liées au média.</p>
+        </div>
+        <div class="cell">
+          <span class="num">02</span>
+          <h3>Conteneurs exotiques</h3>
+          <p>MKV, AVI, MXF, TS et les autres passent par un proxy MP4 local : remux sans perte quand c’est possible, ré-encodage uniquement des pistes incompatibles.</p>
+        </div>
+        <div class="cell">
+          <span class="num">03</span>
+          <h3>Frame exacte garantie</h3>
+          <p>Une image extraite est vérifiée contre le timecode demandé. En cas de dérive supérieure à une demi-image, l’export échoue plutôt que de mentir.</p>
+        </div>
+        <div class="cell">
+          <span class="num">04</span>
+          <h3>Découpe fidèle</h3>
+          <p>Les extraits sont taillés dans le fichier d’origine, pas dans le proxy d’aperçu. Copie directe sans ré-encodage quand les pistes le permettent.</p>
+        </div>
+        <div class="cell">
+          <span class="num">05</span>
+          <h3>Sauvegarde et snapshots</h3>
+          <p>Enregistrement automatique et dix snapshots locaux. Si la sauvegarde principale est corrompue, le dernier état valide est restauré.</p>
+        </div>
+        <div class="cell">
+          <span class="num">06</span>
+          <h3>Médias déplacés</h3>
+          <p>Un fichier déplacé se relie sans perdre une seule annotation, et le proxy de lecture se régénère tout seul.</p>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <section id="confidentialite">
+    <div class="wrap">
+      <p class="kicker">Confidentialité</p>
+      <h2>Votre film ne quitte pas votre Mac</h2>
+      <p class="section-lede">
+        Cinécrique n’a pas de compte, pas de télémétrie et pas de serveur. La seule connexion
+        possible est l’enrichissement TMDB, et c’est vous qui la déclenchez.
+      </p>
+      <div class="privacy">
+        <ul class="claims">
+          <li>
+            <div>
+              <strong>Aucun envoi de média</strong>
+              <span>Vidéos, sous-titres, notes, images et extraits sont lus et écrits localement.</span>
+            </div>
+          </li>
+          <li>
+            <div>
+              <strong>Interface hors ligne par construction</strong>
+              <span>La vue web embarquée interdit toute requête réseau sortante par sa politique de sécurité de contenu.</span>
+            </div>
+          </li>
+          <li>
+            <div>
+              <strong>TMDB facultatif et explicite</strong>
+              <span>Seuls un titre et une langue sont transmis, uniquement quand vous lancez une recherche. Le jeton est conservé dans le Trousseau macOS.</span>
+            </div>
+          </li>
+          <li>
+            <div>
+              <strong>Chaque fichier passe par vous</strong>
+              <span>L’application ne lit que les médias que vous avez ouverts ou déposés, et n’écrit que là où vous l’indiquez.</span>
+            </div>
+          </li>
+        </ul>
+        <div class="panel">
+          <span class="c"># Données locales</span><br>
+          ~/Library/Application Support/<b>Cinecrique/</b><br>
+          &nbsp;&nbsp;├── <b>state.json</b> <span class="c">projets et analyses</span><br>
+          &nbsp;&nbsp;├── <b>Snapshots/</b> <span class="c">10 sauvegardes</span><br>
+          &nbsp;&nbsp;└── <b>Media Proxies/</b> <span class="c">cache de lecture</span><br>
+          <br>
+          <span class="c"># Fichiers d’origine</span><br>
+          <span class="c">jamais modifiés, jamais copiés sans</span><br>
+          <span class="c">une action explicite de votre part</span>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <section id="installer">
+    <div class="wrap">
+      <p class="kicker">Installation</p>
+      <h2>Depuis la release, ou depuis les sources</h2>
+      <p class="section-lede">
+        L’application est distribuée en DMG accompagné de son empreinte SHA-256 et de l’archive
+        source de FFmpeg utilisée pour la compiler.
+      </p>
+      <ol class="steps">
+        <li>
+          <div>
+            <p>Téléchargez le DMG depuis la page des releases, puis vérifiez son empreinte.</p>
+            <code>shasum -a 256 -c "Cinécrique-1.1.0.dmg.sha256"</code>
+          </div>
+        </li>
+        <li>
+          <div>
+            <p>Glissez Cinécrique dans le dossier Applications, puis ouvrez-le.</p>
+          </div>
+        </li>
+        <li>
+          <div>
+            <p>Ou compilez depuis les sources — Node.js et Swift 5.9 suffisent, FFmpeg est compilé par le script.</p>
+            <code>npm install &amp;&amp; npm run macos:run</code>
+          </div>
+        </li>
+      </ol>
+
+      <dl class="specs" style="margin-top: 44px;">
+        <div class="spec">
+          <dt>Système</dt>
+          <dd>macOS 13 ou supérieur, Apple Silicon et Intel.</dd>
+        </div>
+        <div class="spec">
+          <dt>Lecture</dt>
+          <dd>MOV, MP4, M4V nativement ; MKV, WebM, AVI, MXF, TS et autres via proxy local.</dd>
+        </div>
+        <div class="spec">
+          <dt>Sous-titres</dt>
+          <dd>SRT, WebVTT, ASS et SSA, plus extraction des pistes texte intégrées.</dd>
+        </div>
+        <div class="spec">
+          <dt>Exports</dt>
+          <dd>Fountain, Markdown, WebVTT, JSON, PNG, JPEG, MP4, GIF, HTML, PDF et projet complet.</dd>
+        </div>
+      </dl>
+    </div>
+  </section>
+</main>
+
+<footer>
+  <div class="wrap footer-row">
+    <p>
+      Cinécrique — logiciel libre sous licence MIT. FFmpeg est distribué sous LGPL 2.1 ou ultérieure.<br>
+      Les extraits que vous produisez restent soumis aux droits des œuvres citées.
+    </p>
+    <nav class="footer-links" aria-label="Liens du projet">
+      <a href="https://github.com/Matt0967/Cinecrique">Dépôt</a>
+      <a href="https://github.com/Matt0967/Cinecrique/releases">Releases</a>
+      <a href="https://github.com/Matt0967/Cinecrique/blob/main/THIRD_PARTY_NOTICES.md">Composants tiers</a>
+      <a href="https://github.com/Matt0967/Cinecrique/blob/main/LICENSE">Licence</a>
+    </nav>
+  </div>
+</footer>
+
+</body>
+</html>
