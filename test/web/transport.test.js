@@ -72,3 +72,12 @@ test("assigns custom shortcuts by swapping conflicts", () => {
   assert.equal(shortcuts.forward, "j");
   assert.equal(transportShortcut({ key: "l", target: { tagName: "DIV" } }, shortcuts), "reverse");
 });
+
+test("keeps letter shortcuts after a button was clicked, but leaves Space and Enter to the button", () => {
+  const button = { tagName: "BUTTON" };
+  assert.equal(transportShortcut({ key: "o", target: button }), "loopEnd");
+  assert.equal(transportShortcut({ key: "l", target: { tagName: "A" } }), "forward");
+  assert.equal(transportShortcut({ key: " ", target: button }), null);
+  assert.equal(transportShortcut({ key: "Enter", target: button }), null);
+  assert.equal(transportShortcut({ key: "o", target: { tagName: "TEXTAREA" } }), null);
+});

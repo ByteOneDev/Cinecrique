@@ -227,15 +227,19 @@ final class OnlineMediaService {
         readers.wait()
 
         if isCancelled(operationID) { throw OnlineMediaError.cancelled }
-        guard process.terminationStatus == 0 else {
-            throw OnlineMediaError.downloadFailed(OnlineMediaPolicy.readableError(from: state.errorText))
-        }
+        // With --ignore-errors a secondary failure (subtitles, thumbnail) gives a
+        // non-zero status although the video is complete: the file decides.
         guard
             let fileURL = state.file,
             let values = try? fileURL.resourceValues(forKeys: [.isRegularFileKey, .fileSizeKey]),
             values.isRegularFile == true,
             (values.fileSize ?? 0) > 0
-        else { throw OnlineMediaError.outputMissing }
+        else {
+            if process.terminationStatus != 0 {
+                throw OnlineMediaError.downloadFailed(OnlineMediaPolicy.readableError(from: state.errorText))
+            }
+            throw OnlineMediaError.outputMissing
+        }
 
         let base = fileURL.deletingPathExtension()
         let infoURL = base.appendingPathExtension("info.json")

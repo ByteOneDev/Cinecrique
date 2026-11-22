@@ -48,8 +48,14 @@ ligne, relie les plans au scénario et aux notes, et se met à jour tout seul.
 - Le menu Fichier gagne « Projets », « Importer une vidéo en ligne… » et « Importer un scénario
   Fountain… » ; le menu Cinécrique gagne « Rechercher les mises à jour… ».
 
+- **Intégration continue macOS.** Chaque pull request compile l’application Swift et lance les
+  vérifications ; chaque merge sur `main` construit le DMG, le vérifie et le dépose dans une version
+  brouillon (avec manifeste signé si le secret `CINECRIQUE_UPDATE_SIGNING_KEY` est configuré).
+
 ### Corrigé
 
+- Les raccourcis à une touche (J/K/L, I/O, M…) cessaient de fonctionner après un clic sur un bouton du
+  transport, tant que le focus restait sur ce bouton. Seuls Espace et Entrée restent réservés au bouton.
 - Les icônes du menu contextuel des projets étaient poussées vers la droite.
 - Les en-têtes triables du tableau des plans prenaient le fond clair par défaut des boutons.
 

@@ -31,6 +31,28 @@ final class UpdateService {
 
     init(applicationSupportDirectory: URL) {
         updatesDirectory = applicationSupportDirectory.appendingPathComponent("Updates", isDirectory: true)
+        let directory = updatesDirectory
+        queue.async { Self.removeLeftovers(updatesDirectory: directory) }
+    }
+
+    /// An interrupted update can leave a downloaded image, an install script or a
+    /// hidden staging copy next to the application: remove them at the next launch.
+    private static func removeLeftovers(updatesDirectory: URL) {
+        let fileManager = FileManager.default
+        if let items = try? fileManager.contentsOfDirectory(at: updatesDirectory, includingPropertiesForKeys: nil) {
+            for item in items { try? fileManager.removeItem(at: item) }
+        }
+        let parent = Bundle.main.bundleURL.standardizedFileURL.deletingLastPathComponent()
+        let limit = Date().addingTimeInterval(-3_600)
+        guard let siblings = try? fileManager.contentsOfDirectory(
+            at: parent,
+            includingPropertiesForKeys: [.contentModificationDateKey],
+            options: []
+        ) else { return }
+        for item in siblings where item.lastPathComponent.hasPrefix(".Cinecrique-update-") {
+            let modified = (try? item.resourceValues(forKeys: [.contentModificationDateKey]).contentModificationDate) ?? Date()
+            if modified < limit { try? fileManager.removeItem(at: item) }
+        }
     }
 
     // MARK: - Configuration
@@ -187,11 +209,11 @@ final class UpdateService {
                 self.publish(["stage": "downloading", "version": manifest.version, "progress": 0, "message": "Téléchargement de Cinécrique \(manifest.version)"])
                 respond()
                 let dmg = try self.download(manifest)
+                defer { try? FileManager.default.removeItem(at: dmg) }
                 self.publish(["stage": "verifying", "version": manifest.version, "progress": 1, "message": "Vérification de l’empreinte et de la signature"])
                 try Self.verify(dmg, manifest: manifest)
                 self.publish(["stage": "installing", "version": manifest.version, "progress": 1, "message": "Préparation de la nouvelle version"])
                 let staged = try self.stageApplication(from: dmg, manifest: manifest)
-                try? FileManager.default.removeItem(at: dmg)
                 try self.launchSwapHelper(staged: staged)
                 self.publish(["stage": "ready", "version": manifest.version, "message": "Redémarrage de Cinécrique…"])
                 DispatchQueue.main.asyncAfter(deadline: .now() + 0.6) {

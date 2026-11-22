@@ -119,6 +119,9 @@ public enum OnlineMediaPolicy {
             "--ignore-config",
             "--no-playlist",
             "--no-exec",
+            // A failed subtitle or thumbnail (YouTube often answers 429) must not
+            // abort the video itself; the result is judged on the produced file.
+            "--ignore-errors",
             "--no-mtime",
             "--newline",
             "--progress",

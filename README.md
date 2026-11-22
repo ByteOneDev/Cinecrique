@@ -80,7 +80,11 @@ npm run release:check
 npm run release:sign
 ```
 
-Joignez `dist/Cinecrique-<version>.dmg` et `dist/cinecrique-update.json` à la publication GitHub dont le
+Le workflow `.github/workflows/macos.yml` fait la même chose automatiquement après chaque merge sur
+`main` : il construit et vérifie le DMG puis crée une version brouillon à publier. Pour qu’il signe aussi
+le manifeste, ajoutez le contenu de la clé privée comme secret `CINECRIQUE_UPDATE_SIGNING_KEY` du dépôt.
+
+À la main, joignez `dist/Cinecrique-<version>.dmg` et `dist/cinecrique-update.json` à la publication GitHub dont le
 tag est le numéro de version. L’application lit le manifeste de la dernière publication, vérifie la
 signature, la taille et le SHA-256 du DMG, puis la signature de code de la nouvelle version avant de la
 mettre en place.

@@ -126,8 +126,11 @@ export function transportShortcut(event, shortcuts = DEFAULT_SHORTCUTS) {
   if (event?.metaKey || event?.ctrlKey || event?.altKey) return null;
   const target = event?.target;
   const tagName = String(target?.tagName || "").toLowerCase();
-  if (target?.isContentEditable || ["input", "textarea", "select", "button", "a"].includes(tagName)) return null;
+  if (target?.isContentEditable || ["input", "textarea", "select"].includes(tagName)) return null;
   const key = String(event?.key || "").toLocaleLowerCase("fr");
+  // A focused button or link keeps Space and Enter (they activate it); letter
+  // shortcuts must keep working after a transport button was clicked.
+  if (["button", "a"].includes(tagName) && [" ", "enter"].includes(key)) return null;
   const normalizedKey = normalizeShortcutKey(key);
   const action = Object.entries(normalizeShortcuts(shortcuts)).find(([, assigned]) => assigned === normalizedKey)?.[0];
   return action || null;
