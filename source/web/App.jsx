@@ -1917,9 +1917,15 @@ export function App() {
   const attachMediaResult = useCallback((result) => {
     if (!activeProject?.id || !result?.path) return;
     const online = result.online ? onlineProjectFields(result.online, activeProject.title) : null;
+    const onlineCover = result.online?.thumbnailDataURL
+      ? normalizeProjectCover({ mode: "image", source: "local", value: result.online.thumbnailDataURL })
+      : null;
+    // The downloaded thumbnail only replaces the default mark, never a cover the user chose.
+    const keepsCover = normalizeProjectCover(activeProject.cover, activeProject.poster).mode !== "logo";
     const replacement = {
       ...activeProject,
       ...(online ? { source: online.source } : {}),
+      ...(onlineCover?.mode === "image" && !keepsCover ? { cover: onlineCover } : {}),
       ...(!activeProject.path ? { detail: online?.detail || projectDetail(result.metadata) } : {}),
       path: result.path,
       playbackPath: result.playbackPath || result.path,
