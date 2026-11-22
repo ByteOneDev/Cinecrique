@@ -11,7 +11,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
 
         let controller = WebAppViewController()
         let window = NSWindow(
-            contentRect: NSRect(x: 0, y: 0, width: 1440, height: 920),
+            contentRect: WindowModeController.launcherFrame(on: NSScreen.main),
             styleMask: [.titled, .closable, .miniaturizable, .resizable, .fullSizeContentView],
             backing: .buffered,
             defer: false
@@ -24,8 +24,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         window.minSize = NSSize(width: 960, height: 680)
         window.contentViewController = controller
         window.delegate = self
-        window.setFrameAutosaveName("Cinecrique.MainWindow")
-        window.center()
+        // The project manager opens first at a compact size; the workspace frame
+        // is restored by WindowModeController when a project is opened.
+        window.setFrame(WindowModeController.launcherFrame(on: window.screen ?? NSScreen.main), display: false)
         window.makeKeyAndOrderFront(nil)
 
         self.webController = controller
@@ -45,6 +46,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
     }
 
     func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply {
+        if let window { WindowModeController.shared.rememberWorkspaceFrame(of: window) }
         guard let webController else { return .terminateNow }
         webController.requestFrontendFlush(reason: "terminate", timeout: 5) { success in
             NSApp.reply(toApplicationShouldTerminate: success)
@@ -53,6 +55,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
     }
 
     func windowShouldClose(_ sender: NSWindow) -> Bool {
+        WindowModeController.shared.rememberWorkspaceFrame(of: sender)
         guard !closingAfterFlush, let webController else { return true }
         webController.requestFrontendFlush(reason: "window-close", timeout: 5) { [weak self, weak sender] success in
             guard let self, let sender else { return }
@@ -92,6 +95,22 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         webController?.dispatchEvent(named: "analyse:export-requested")
     }
 
+    @objc private func showProjects(_ sender: Any?) {
+        webController?.dispatchEvent(named: "analyse:show-launcher")
+    }
+
+    @objc private func openOnlineVideo(_ sender: Any?) {
+        webController?.dispatchEvent(named: "analyse:open-online-requested")
+    }
+
+    @objc private func openFountain(_ sender: Any?) {
+        webController?.dispatchEvent(named: "analyse:open-fountain-requested")
+    }
+
+    @objc private func checkForUpdates(_ sender: Any?) {
+        webController?.dispatchEvent(named: "analyse:check-updates-requested")
+    }
+
     @objc private func reloadInterface(_ sender: Any?) {
         webController?.reloadAfterFlush()
     }
@@ -103,6 +122,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         mainMenu.addItem(appMenuItem)
         let appMenu = NSMenu(title: "Cinécrique")
         appMenu.addItem(withTitle: "À propos de Cinécrique", action: #selector(NSApplication.orderFrontStandardAboutPanel(_:)), keyEquivalent: "")
+        let updatesItem = appMenu.addItem(withTitle: "Rechercher les mises à jour…", action: #selector(checkForUpdates(_:)), keyEquivalent: "")
+        updatesItem.target = self
         appMenu.addItem(.separator())
         appMenu.addItem(withTitle: "Masquer Cinécrique", action: #selector(NSApplication.hide(_:)), keyEquivalent: "h")
         appMenu.addItem(withTitle: "Quitter Cinécrique", action: #selector(NSApplication.terminate(_:)), keyEquivalent: "q")
@@ -111,11 +132,21 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         let fileMenuItem = NSMenuItem()
         mainMenu.addItem(fileMenuItem)
         let fileMenu = NSMenu(title: "Fichier")
+        let projectsItem = fileMenu.addItem(withTitle: "Projets", action: #selector(showProjects(_:)), keyEquivalent: "p")
+        projectsItem.keyEquivalentModifierMask = [.command, .shift]
+        projectsItem.target = self
+        fileMenu.addItem(.separator())
         let openVideoItem = fileMenu.addItem(withTitle: "Ouvrir une vidéo…", action: #selector(openVideo(_:)), keyEquivalent: "o")
         openVideoItem.target = self
         let openSubtitleItem = fileMenu.addItem(withTitle: "Ouvrir des sous-titres…", action: #selector(openSubtitle(_:)), keyEquivalent: "o")
         openSubtitleItem.keyEquivalentModifierMask = [.command, .shift]
         openSubtitleItem.target = self
+        let onlineItem = fileMenu.addItem(withTitle: "Importer une vidéo en ligne…", action: #selector(openOnlineVideo(_:)), keyEquivalent: "l")
+        onlineItem.keyEquivalentModifierMask = [.command, .shift]
+        onlineItem.target = self
+        let fountainItem = fileMenu.addItem(withTitle: "Importer un scénario Fountain…", action: #selector(openFountain(_:)), keyEquivalent: "i")
+        fountainItem.keyEquivalentModifierMask = [.command, .shift]
+        fountainItem.target = self
         fileMenu.addItem(.separator())
         let saveItem = fileMenu.addItem(withTitle: "Enregistrer", action: #selector(saveProject(_:)), keyEquivalent: "s")
         saveItem.target = self

@@ -1,0 +1,108 @@
+name: macOS
+
+# Sur chaque pull request : tests web, compilation Swift et vérifications AnalyseCore.
+# Après un merge sur main (ou à la demande) : build complet, DMG vérifié par
+# `npm run release:check`, puis publication brouillon de la version si elle n’existe pas encore.
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: macos-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  verify:
+    name: Compiler et vérifier
+    runs-on: macos-15
+    timeout-minutes: 40
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - run: npm ci
+      - run: npm test
+      - run: npm run build
+      - name: Compiler l’application Swift
+        run: swift build --configuration release
+      - name: Vérifications AnalyseCore
+        run: swift run --configuration release AnalyseCoreChecks
+
+  dmg:
+    name: Construire le DMG
+    needs: verify
+    if: github.event_name == 'push' || github.event_name == 'workflow_dispatch'
+    runs-on: macos-15
+    timeout-minutes: 90
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - run: npm ci
+      - name: Cache FFmpeg
+        uses: actions/cache@v4
+        with:
+          path: |
+            .build/ffmpeg-source
+            .build/ffmpeg-tools
+          key: ffmpeg-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('scripts/build_ffmpeg_tools.sh') }}
+      - name: Construire et vérifier le DMG
+        env:
+          CINECRIQUE_BUILD_CONFIGURATION: release
+        run: npm run release:check
+      - name: Signer le manifeste de mise à jour
+        env:
+          SIGNING_KEY: ${{ secrets.CINECRIQUE_UPDATE_SIGNING_KEY }}
+        run: |
+          VERSION="$(node -p "require('./package.json').version")"
+          ASSET="dist/Cinecrique-$VERSION.dmg"
+          cp "dist/Cinécrique-$VERSION.dmg" "$ASSET"
+          shasum -a 256 "$ASSET" | sed "s#dist/##" > "$ASSET.sha256"
+          PUBLIC_KEY="$(/usr/libexec/PlistBuddy -c 'Print :CinecriqueUpdatePublicKey' resources/macos/Info.plist)"
+          if [[ -n "$SIGNING_KEY" && -n "$PUBLIC_KEY" ]]; then
+            KEY_FILE="$RUNNER_TEMP/update-signing-key.pem"
+            umask 077
+            printf '%s\n' "$SIGNING_KEY" > "$KEY_FILE"
+            CINECRIQUE_UPDATE_KEY="$KEY_FILE" node scripts/sign_update.mjs sign "$ASSET"
+            rm -f "$KEY_FILE"
+          else
+            echo "::notice::Pas de clé de signature configurée : DMG produit sans manifeste de mise à jour automatique."
+          fi
+      - uses: actions/upload-artifact@v4
+        with:
+          name: Cinecrique-dmg
+          path: |
+            dist/Cinecrique-*.dmg
+            dist/Cinecrique-*.dmg.sha256
+            dist/cinecrique-update.json
+            dist/ffmpeg-*-source.tar.xz*
+          if-no-files-found: error
+      - name: Préparer la version brouillon
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          VERSION="$(node -p "require('./package.json').version")"
+          FILES=("dist/Cinecrique-$VERSION.dmg" "dist/Cinecrique-$VERSION.dmg.sha256")
+          [[ -f dist/cinecrique-update.json ]] && FILES+=("dist/cinecrique-update.json")
+          FILES+=(dist/ffmpeg-*-source.tar.xz dist/ffmpeg-*-source.tar.xz.sha256)
+          STATE="$(gh api "repos/$GITHUB_REPOSITORY/releases?per_page=100" --jq ".[] | select(.tag_name == \"$VERSION\") | if .draft then \"draft\" else \"published\" end" | head -n1)"
+          node --input-type=module -e "import {changelogSection} from './scripts/update_manifest.mjs'; import {readFileSync, writeFileSync} from 'node:fs'; writeFileSync(process.env.RUNNER_TEMP + '/notes.md', changelogSection(readFileSync('CHANGELOG.md','utf8'), '$VERSION') || 'Cinécrique $VERSION');"
+          if [[ "$STATE" == "published" ]]; then
+            echo "::notice::La version $VERSION est déjà publiée : le DMG reste disponible dans les artefacts du workflow."
+          elif [[ "$STATE" == "draft" ]]; then
+            gh release upload "$VERSION" "${FILES[@]}" --clobber
+          else
+            gh release create "$VERSION" "${FILES[@]}" --draft --target "$GITHUB_SHA" --title "Cinécrique $VERSION" --notes-file "$RUNNER_TEMP/notes.md"
+          fi

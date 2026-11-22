@@ -1,12 +1,13 @@
 {
   "name": "cinecrique",
-  "version": "1.1.0",
+  "version": "1.2.0",
   "private": true,
   "type": "module",
   "scripts": {
     "dev": "vite",
     "build": "vite build",
     "test": "node --test test/web/*.test.js",
+    "release:sign": "node scripts/sign_update.mjs sign",
     "media:check": "./scripts/check_media_proxy.sh",
     "preview": "vite preview",
     "macos:ffmpeg": "./scripts/build_ffmpeg_tools.sh",

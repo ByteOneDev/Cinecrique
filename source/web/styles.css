@@ -518,7 +518,7 @@ select:focus-visible,
 
 .project-context-menu > button:hover,
 .project-move-options button:hover { background: #242d32; }
-.project-context-menu > button > svg:last-child { margin-left: auto; }
+.project-context-menu > button > svg:last-child:not(:first-child) { margin-left: auto; }
 .project-context-menu button:disabled { opacity: 0.35; cursor: not-allowed; }
 .project-context-menu button.danger { color: #ef8d88; }
 .project-context-menu button.danger:hover { color: #fff; background: #74332f; }

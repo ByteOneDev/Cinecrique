@@ -1,3 +1,4 @@
+import CryptoKit
 import Foundation
 import AnalyseCore
 
@@ -650,6 +651,81 @@ do {
         ClipExportPolicy.watermarkMetrics(frameHeight: 10, size: .medium).fontSize >= 11,
         "watermark stays legible on tiny frames"
     )
+
+    // Online import: only public web pages reach yt-dlp, always after `--`.
+    try expect(OnlineMediaPolicy.validatedPageURL("https://www.youtube.com/watch?v=abc") != nil, "YouTube page accepted")
+    try expect(OnlineMediaPolicy.validatedPageURL("https://archive.org/details/film") != nil, "Internet Archive page accepted")
+    for rejected in ["file:///etc/passwd", "http://localhost:8080/v", "http://192.168.1.2/v", "http://10.0.0.1/", "https://user:pw@site.com/v", "-o /tmp/x", "ftp://a.b/c", "https://a b.com"] {
+        try expect(OnlineMediaPolicy.validatedPageURL(rejected) == nil, "online URL rejected: \(rejected)")
+    }
+    let onlineRequest = try OnlineMediaPolicy.request(
+        rawURL: "https://vimeo.com/123",
+        quality: "720",
+        cookiesBrowser: "firefox",
+        subtitles: true
+    )
+    let onlineArguments = OnlineMediaPolicy.arguments(
+        request: onlineRequest,
+        outputDirectory: URL(fileURLWithPath: "/Users/test/Movies/Cinécrique"),
+        ffmpegDirectory: URL(fileURLWithPath: "/Applications/Cinécrique.app/Contents/Resources/Tools")
+    )
+    try expect(onlineArguments.suffix(2) == ["--", "https://vimeo.com/123"], "page URL passed after --")
+    try expect(onlineArguments.contains("--ignore-config") && onlineArguments.contains("--no-exec"), "user config and exec hooks ignored")
+    try expect(onlineArguments.contains("--cookies-from-browser") && onlineArguments.contains("firefox"), "chosen browser cookies forwarded")
+    try expect(OnlineMediaPolicy.formatSelector(quality: "720").hasPrefix("bv*[height<=720][vcodec^=avc1]"), "quality caps the video height")
+    let fallbackRequest = try OnlineMediaPolicy.request(rawURL: "https://a.example/v", quality: "9999", cookiesBrowser: "netscape", subtitles: false)
+    try expect(fallbackRequest.quality == "1080" && fallbackRequest.cookiesBrowser == nil, "unknown options fall back safely")
+    let parsedProgress = OnlineMediaPolicy.parseProgress("[cinecrique-progress] 500 NA 1000 250.5")
+    try expect(parsedProgress?.fraction == 0.5 && parsedProgress?.bytesPerSecond == 250.5, "progress uses the estimate when the total is unknown")
+    let outputRoot = URL(fileURLWithPath: "/Users/test/Movies/Cinécrique")
+    try expect(
+        OnlineMediaPolicy.parseOutputFile("[cinecrique-file] /Users/test/Movies/Cinécrique/Film [x].mp4", outputDirectory: outputRoot)?.lastPathComponent == "Film [x].mp4",
+        "downloaded file located"
+    )
+    try expect(
+        OnlineMediaPolicy.parseOutputFile("[cinecrique-file] /etc/passwd", outputDirectory: outputRoot) == nil,
+        "downloaded file must stay in the download folder"
+    )
+    try expect(
+        OnlineMediaPolicy.expectedChecksum(in: "\(String(repeating: "b", count: 64))  yt-dlp\n\(String(repeating: "c", count: 64))  yt-dlp_macos\n") == String(repeating: "c", count: 64),
+        "yt-dlp checksum read from the release sums"
+    )
+    try expect(OnlineMediaPolicy.readableError(from: "WARNING: x\nERROR: [generic] Unsupported URL: https://a") == "Aucune vidéo reconnue sur cette page.", "readable engine errors")
+
+    // Updates: versions, manifest validation and Ed25519 compatibility with the release script.
+    try expect(UpdatePolicy.compareVersions("1.10.0", "1.9.9") == 1, "numeric version comparison")
+    try expect(UpdatePolicy.compareVersions("v1.2", "1.2.0") == 0, "equivalent versions")
+    try expect(UpdatePolicy.compareVersions("1.1.0", "1.2.0") == -1, "older version")
+    try expect(UpdatePolicy.shouldCheck(lastCheck: nil, now: Date(), enabled: true), "first automatic check")
+    try expect(!UpdatePolicy.shouldCheck(lastCheck: Date(), now: Date(), enabled: true), "daily check throttled")
+    try expect(!UpdatePolicy.shouldCheck(lastCheck: nil, now: Date(), enabled: false), "automatic checks can be disabled")
+    try expect(UpdatePolicy.isAllowedDownloadURL(URL(string: "https://github.com/ByteOneDev/Cinecrique/releases/download/1.2.0/C.dmg")!), "GitHub release download allowed")
+    try expect(!UpdatePolicy.isAllowedDownloadURL(URL(string: "http://github.com/x.dmg")!), "plain HTTP update refused")
+    try expect(!UpdatePolicy.isAllowedDownloadURL(URL(string: "https://evil.example/x.dmg")!), "foreign host refused")
+    try expect(UpdatePolicy.installLocationProblem(bundlePath: "/private/var/folders/x/AppTranslocation/Y/d/Cinécrique.app", parentWritable: true) != nil, "translocated copies cannot update")
+    try expect(UpdatePolicy.installLocationProblem(bundlePath: "/Applications/Cinécrique.app", parentWritable: true) == nil, "Applications copy can update")
+
+    let manifestSignature = "ZludMI2sgDZG1CNMofyldNry73cAEqPat4R7cOfKloXLDwgab/ry6BNVcTtQVe/RsIDspQwxbBhb4cvZ4S6lDw=="
+    let manifestJSON = """
+    {"schema":1,"version":"1.2.0","build":"3","notes":"- Accueil","dmg":{"url":"https://github.com/ByteOneDev/Cinecrique/releases/download/1.2.0/Cinecrique-1.2.0.dmg","size":42,"sha256":"\(String(repeating: "a", count: 64))"},"signature":"\(manifestSignature)"}
+    """
+    let manifest = try UpdatePolicy.parseManifest(Data(manifestJSON.utf8))
+    try expect(manifest.version == "1.2.0" && manifest.size == 42, "signed manifest parsed")
+    let publicKey = try Curve25519.Signing.PublicKey(
+        rawRepresentation: Data(base64Encoded: "6kpsY+KcUgq+9VB7Ey7F+ZVHdq6+vnuSQh7qaRRG0iw=")!
+    )
+    let message = UpdatePolicy.signedMessage(version: manifest.version, size: manifest.size, sha256: manifest.sha256)
+    try expect(publicKey.isValidSignature(manifest.signature, for: message), "Ed25519 signature from the release script verifies")
+    try expect(
+        !publicKey.isValidSignature(manifest.signature, for: UpdatePolicy.signedMessage(version: "1.2.1", size: 42, sha256: manifest.sha256)),
+        "a signature cannot be reused for another version"
+    )
+    do {
+        _ = try UpdatePolicy.parseManifest(Data(manifestJSON.replacingOccurrences(of: "https://github.com", with: "https://evil.example").utf8))
+        throw CheckError.failed("manifest pointing outside GitHub should be rejected")
+    } catch UpdateError.invalidManifest {
+        // Expected.
+    }
 
     print("AnalyseCoreChecks: extended checks passed")
 } catch {

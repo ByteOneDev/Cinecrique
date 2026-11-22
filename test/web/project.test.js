@@ -112,6 +112,8 @@ test("migrates an old persisted project and clamps its preferences", () => {
       togglePlayback: " ", reverse: "j", pause: "k", forward: "l", slower: "r",
       silent: "a", loopStart: "i", loopEnd: "o", mute: "m",
     },
+    launcherSort: "recent",
+    onlineImport: { quality: "1080", cookiesBrowser: "", subtitles: true },
   });
   assert.equal(migrated.documents.film.script, undefined);
 });
@@ -311,4 +313,18 @@ test("resolves replacement with only the imported workspace", () => {
   assert.equal(result.state.activeProjectId, "import");
   assert.equal(result.state.documents.import.analysis, "Importée");
   assert.equal(result.state.projects[0].path, "/tmp/imported.mkv");
+});
+
+test("keeps launcher preferences and the last opening date of projects", () => {
+  const migrated = migratePersistedState({
+    version: 6,
+    projects: [{ id: "a", title: "A", lastOpenedAt: 1_700_000_000_000 }, { id: "b", title: "B", lastOpenedAt: "x" }],
+    documents: {},
+    preferences: { launcherSort: "title", onlineImport: { quality: "720", cookiesBrowser: "firefox", subtitles: false } },
+  });
+  assert.equal(migrated.projects[0].lastOpenedAt, 1_700_000_000_000);
+  assert.equal(Object.hasOwn(migrated.projects[1], "lastOpenedAt"), false);
+  assert.equal(migrated.preferences.launcherSort, "title");
+  assert.deepEqual(migrated.preferences.onlineImport, { quality: "720", cookiesBrowser: "firefox", subtitles: false });
+  assert.equal(migratePersistedState({ version: 6, projects: [], documents: {}, preferences: { launcherSort: "evil" } }).preferences.launcherSort, "recent");
 });

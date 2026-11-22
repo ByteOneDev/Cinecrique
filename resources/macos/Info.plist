@@ -21,9 +21,15 @@
   <key>CFBundlePackageType</key>
   <string>APPL</string>
   <key>CFBundleShortVersionString</key>
-  <string>1.1.0</string>
+  <string>1.2.0</string>
   <key>CFBundleVersion</key>
-  <string>2</string>
+  <string>3</string>
+  <key>CinecriqueUpdateFeedURL</key>
+  <string>https://github.com/ByteOneDev/Cinecrique/releases/latest/download/cinecrique-update.json</string>
+  <key>CinecriqueReleasesAPIURL</key>
+  <string>https://api.github.com/repos/ByteOneDev/Cinecrique/releases/latest</string>
+  <key>CinecriqueUpdatePublicKey</key>
+  <string></string>
   <key>LSMinimumSystemVersion</key>
   <string>13.0</string>
   <key>NSHighResolutionCapable</key>
@@ -81,6 +87,19 @@
         <string>vtt</string>
         <string>ass</string>
         <string>ssa</string>
+      </array>
+    </dict>
+    <dict>
+      <key>CFBundleTypeName</key>
+      <string>Scénario Fountain</string>
+      <key>CFBundleTypeRole</key>
+      <string>Editor</string>
+      <key>LSHandlerRank</key>
+      <string>Alternate</string>
+      <key>CFBundleTypeExtensions</key>
+      <array>
+        <string>fountain</string>
+        <string>spmd</string>
       </array>
     </dict>
   </array>
