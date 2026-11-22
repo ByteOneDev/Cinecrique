@@ -31,7 +31,12 @@ Les artefacts générés se trouvent dans `dist/` : application, ZIP, DMG, check
 
 ## Fonctions disponibles
 
+- accueil façon logiciel de montage : liste des projets, reprise du dernier projet, recherche, tri et archives, avant d’ouvrir l’atelier ;
 - import local par sélecteur macOS, ouverture de fichier ou glisser-déposer ;
+- import de vidéos en ligne (YouTube, Internet Archive, Vimeo, plateformes de streaming moins connues…) via yt-dlp, avec sous-titres et couverture ;
+- plans insérés et annotés directement dans les notes Markdown ;
+- import de scénarios Fountain et plans liés aux scènes par des notes Fountain `[[plan:…]]` ;
+- mises à jour automatiques signées (Ed25519) ;
 - lecture, pause, navigation par plan et image par image avec timecode ;
 - métadonnées techniques extraites localement avec `ffprobe` ;
 - lecture des conteneurs MKV, AVI, MXF et autres via un proxy MP4 local, avec remux sans perte lorsque les pistes sont compatibles ;
@@ -49,7 +54,36 @@ Les artefacts générés se trouvent dans `dist/` : application, ZIP, DMG, check
 - éditeur Notes en Markdown et éditeur Scénario en Fountain, tous deux en JetBrains Mono ;
 - enrichissement TMDB facultatif dans la langue choisie.
 
+Les vidéos en ligne sont enregistrées dans `~/Movies/Cinécrique`. Le moteur yt-dlp géré par Cinécrique
+est installé à la demande dans `~/Library/Application Support/Cinecrique/Tools`, après vérification de
+l’empreinte SHA-256 publiée avec chaque version de yt-dlp ; un yt-dlp installé par Homebrew est aussi
+reconnu. Les flux protégés par DRM (Netflix, Disney+, Prime Video…) ne sont pas pris en charge.
+
 Le jeton TMDB est stocké dans le Trousseau macOS. Le fichier vidéo n’est jamais envoyé à TMDB : seules la recherche textuelle et la langue sont transmises quand l’utilisateur lance l’enrichissement.
+
+## Publier une mise à jour automatique
+
+Une seule fois, sur la machine de publication :
+
+```bash
+node scripts/sign_update.mjs keygen
+```
+
+La clé privée est écrite dans `~/.cinecrique/update-signing-key.pem` (jamais dans le dépôt) ; copiez la
+clé publique affichée dans `resources/macos/Info.plist` → `CinecriqueUpdatePublicKey`. Les copies
+installées avant cette étape annoncent les nouvelles versions et ouvrent leur page, sans les installer.
+
+À chaque version :
+
+```bash
+npm run release:check
+npm run release:sign
+```
+
+Joignez `dist/Cinecrique-<version>.dmg` et `dist/cinecrique-update.json` à la publication GitHub dont le
+tag est le numéro de version. L’application lit le manifeste de la dernière publication, vérifie la
+signature, la taille et le SHA-256 du DMG, puis la signature de code de la nouvelle version avant de la
+mettre en place.
 
 ## Données locales
 

@@ -17,6 +17,9 @@ final class NativeBridge: NSObject, WKScriptMessageHandler {
     private let stateQueue = DispatchQueue(label: "app.analyse.state-store", qos: .userInitiated)
     private let mediaProxyService: MediaProxyService?
     private let mediaProxyInitializationError: String?
+    private let onlineMediaService: OnlineMediaService?
+    private let updateService: UpdateService?
+    private var automaticUpdateCheckScheduled = false
     private let pendingImportLock = NSLock()
     private var pendingImportedMedia: [String: URL] = [:]
 
@@ -47,7 +50,18 @@ final class NativeBridge: NSObject, WKScriptMessageHandler {
             mediaProxyService = nil
             mediaProxyInitializationError = storeError
         }
+        if let supportPath = loadedStore?.directoryPath {
+            let supportURL = URL(fileURLWithPath: supportPath, isDirectory: true)
+            onlineMediaService = OnlineMediaService(applicationSupportDirectory: supportURL)
+            updateService = UpdateService(applicationSupportDirectory: supportURL)
+        } else {
+            onlineMediaService = nil
+            updateService = nil
+        }
         super.init()
+        updateService?.onStateChange = { [weak self] state in
+            self?.emitEvent(named: "analyse:update-state", detail: state)
+        }
     }
 
     deinit {
@@ -130,6 +144,18 @@ final class NativeBridge: NSObject, WKScriptMessageHandler {
             prepareProject(first) { [weak self] result in
                 self?.emitEvent(named: "analyse:project-dropped", detail: result)
             }
+        } else if Self.isFountain(first) {
+            workQueue.async { [weak self] in
+                do {
+                    let detail = try Self.readFountain(first)
+                    self?.emitEvent(named: "analyse:fountain-dropped", detail: detail)
+                } catch {
+                    self?.emitEvent(named: "analyse:fountain-dropped", detail: [
+                        "name": first.lastPathComponent,
+                        "error": error.localizedDescription,
+                    ])
+                }
+            }
         } else {
             emitEvent(named: "analyse:file-rejected", detail: [
                 "message": "Ce type de fichier n’est pas pris en charge."
@@ -148,8 +174,9 @@ final class NativeBridge: NSObject, WKScriptMessageHandler {
                 respond(identifier: identifier, error: "Opération média invalide.")
                 return
             }
+            let cancelledDownload = onlineMediaService?.cancel(operationID: operationID) ?? false
             let cancelled = mediaProxyService?.cancel(operationID: operationID) ?? false
-            respond(identifier: identifier, result: ["cancelled": cancelled])
+            respond(identifier: identifier, result: ["cancelled": cancelled || cancelledDownload])
         case "clearMediaProxy":
             clearMediaProxy(payload: payload, identifier: identifier)
         case "openSubtitle":
@@ -251,12 +278,77 @@ final class NativeBridge: NSObject, WKScriptMessageHandler {
                 "ffmpegAvailable": MediaToolLocator.executableURL(named: "ffmpeg") != nil,
                 "mediaProxyAvailable": mediaProxyService?.available == true,
                 "clipExportAvailable": clipExportService.available,
-                "applicationSupport": stateStore?.directoryPath ?? ""
+                "applicationSupport": stateStore?.directoryPath ?? "",
+                "version": Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "",
+                "build": Bundle.main.object(forInfoDictionaryKey: "CFBundleVersion") as? String ?? ""
             ])
+        case "openFountain":
+            chooseFountain(identifier: identifier)
+        case "onlineToolStatus":
+            guard let service = onlineMediaService else {
+                respond(identifier: identifier, result: ["available": false])
+                return
+            }
+            DispatchQueue.global(qos: .userInitiated).async { [weak self] in
+                self?.respond(identifier: identifier, result: service.status().dictionary)
+            }
+        case "installOnlineTool":
+            guard let service = onlineMediaService else {
+                respond(identifier: identifier, error: stateStoreInitializationError ?? "Le dossier de l’application est indisponible.")
+                return
+            }
+            DispatchQueue.global(qos: .userInitiated).async { [weak self] in
+                do {
+                    let status = try service.installLatestTool()
+                    self?.respond(identifier: identifier, result: status.dictionary)
+                } catch {
+                    self?.respond(identifier: identifier, error: error.localizedDescription)
+                }
+            }
+        case "downloadOnlineVideo":
+            downloadOnlineVideo(payload: payload, identifier: identifier)
+        case "updateStatus":
+            respond(identifier: identifier, result: updateService?.snapshot() ?? ["stage": "idle", "autoUpdate": false])
+        case "checkForUpdates":
+            guard let updateService else {
+                respond(identifier: identifier, error: UpdateError.notConfigured.localizedDescription)
+                return
+            }
+            updateService.check { [weak self] state in
+                self?.respond(identifier: identifier, result: state)
+            }
+        case "installUpdate":
+            guard let updateService else {
+                respond(identifier: identifier, error: UpdateError.notConfigured.localizedDescription)
+                return
+            }
+            updateService.install { [weak self] state in
+                self?.respond(identifier: identifier, result: state)
+            }
+        case "setAutoUpdate":
+            let enabled = payload["enabled"] as? Bool ?? true
+            updateService?.autoUpdateEnabled = enabled
+            respond(identifier: identifier, result: ["autoUpdate": enabled])
+        case "setWindowMode":
+            guard let mode = (payload["mode"] as? String).flatMap(WindowMode.init(rawValue:)) else {
+                respond(identifier: identifier, error: "Mode de fenêtre invalide.")
+                return
+            }
+            DispatchQueue.main.async { [weak self] in
+                if let window = self?.webView?.window {
+                    WindowModeController.shared.apply(mode, to: window)
+                }
+                self?.respond(identifier: identifier, result: ["mode": mode.rawValue])
+            }
         case "frontendReady":
             DispatchQueue.main.async { [weak self] in
-                self?.onFrontendReady?()
-                self?.respond(identifier: identifier, result: ["ready": true])
+                guard let self else { return }
+                self.onFrontendReady?()
+                self.respond(identifier: identifier, result: ["ready": true])
+                if !self.automaticUpdateCheckScheduled {
+                    self.automaticUpdateCheckScheduled = true
+                    self.updateService?.checkAutomaticallyIfDue()
+                }
             }
         default:
             respond(identifier: identifier, error: "Commande native inconnue : \(command)")
@@ -343,6 +435,141 @@ final class NativeBridge: NSObject, WKScriptMessageHandler {
 
             self?.prepareVideo(url, operationID: identifier) { result in
                 self?.respond(identifier: identifier, result: result)
+            }
+        }
+    }
+
+    private func chooseFountain(identifier: String) {
+        DispatchQueue.main.async { [weak self] in
+            let panel = NSOpenPanel()
+            panel.title = "Importer un scénario Fountain"
+            panel.prompt = "Importer"
+            panel.canChooseFiles = true
+            panel.canChooseDirectories = false
+            panel.allowsMultipleSelection = false
+            panel.allowedContentTypes = Self.fountainTypes
+
+            guard panel.runModal() == .OK, let url = panel.url else {
+                self?.respond(identifier: identifier, result: ["cancelled": true])
+                return
+            }
+            self?.workQueue.async {
+                do {
+                    var result = try Self.readFountain(url, allowPlainText: true)
+                    result["cancelled"] = false
+                    self?.respond(identifier: identifier, result: result)
+                } catch {
+                    self?.respond(identifier: identifier, error: error.localizedDescription)
+                }
+            }
+        }
+    }
+
+    private static func readFountain(_ url: URL, allowPlainText: Bool = false) throws -> [String: Any] {
+        let extensions: Set<String> = allowPlainText ? fountainExtensions.union(["txt"]) : fountainExtensions
+        let safeURL = try validatedFileURL(url, extensions: extensions, maximumBytes: 8 * 1_024 * 1_024)
+        let data = try Data(contentsOf: safeURL, options: .mappedIfSafe)
+        let content = String(data: data, encoding: .utf8)
+            ?? String(data: data, encoding: .utf16)
+            ?? String(data: data, encoding: .windowsCP1252)
+            ?? String(decoding: data, as: UTF8.self)
+        return ["name": safeURL.lastPathComponent, "content": content]
+    }
+
+    private func downloadOnlineVideo(payload: [String: Any], identifier: String) {
+        guard let service = onlineMediaService else {
+            respond(identifier: identifier, error: stateStoreInitializationError ?? "Le dossier de l’application est indisponible.")
+            return
+        }
+        let operationID = (payload["operationId"] as? String).flatMap { value in
+            !value.isEmpty && value.utf8.count <= 128 ? value : nil
+        } ?? UUID().uuidString
+        let request: OnlineMediaPolicy.Request
+        do {
+            request = try OnlineMediaPolicy.request(
+                rawURL: payload["url"] as? String ?? "",
+                quality: payload["quality"] as? String,
+                cookiesBrowser: payload["cookiesBrowser"] as? String,
+                subtitles: payload["subtitles"] as? Bool ?? true
+            )
+        } catch {
+            respond(identifier: identifier, error: error.localizedDescription)
+            return
+        }
+        let sourceName = String((request.url.host ?? "Vidéo en ligne").prefix(200))
+
+        DispatchQueue.global(qos: .userInitiated).async { [weak self] in
+            guard let self else { return }
+            self.emitMediaPreparation(
+                operationID: operationID,
+                name: sourceName,
+                progress: MediaProxyService.Progress(stage: "download", fraction: 0.01, message: "Connexion au service…", cancellable: true)
+            )
+            do {
+                let download = try service.download(request: request, operationID: operationID) { [weak self] progress in
+                    self?.emitMediaPreparation(
+                        operationID: operationID,
+                        name: sourceName,
+                        progress: MediaProxyService.Progress(stage: "download", fraction: progress.fraction, message: progress.message, cancellable: true)
+                    )
+                }
+                var online: [String: Any] = ["url": request.url.absoluteString]
+                let fields = [
+                    ("title", "title"),
+                    ("uploader", "uploader"),
+                    ("extractor", "extractor_key"),
+                    ("uploadDate", "upload_date"),
+                    ("webpageURL", "webpage_url"),
+                ]
+                for (key, source) in fields {
+                    if let value = download.info[source] as? String { online[key] = value }
+                }
+                if online["uploader"] == nil, let channel = download.info["channel"] as? String { online["uploader"] = channel }
+                if let duration = download.info["duration"] as? Double { online["duration"] = duration }
+                if let thumbnail = download.thumbnailURL, let dataURL = try? CoverService.dataURL(fromFile: thumbnail) {
+                    online["thumbnailDataURL"] = dataURL
+                }
+                let subtitleURL = download.subtitleURL
+
+                self.prepareVideo(download.fileURL, operationID: operationID) { [weak self] prepared in
+                    var result = prepared
+                    if result["path"] != nil {
+                        result["online"] = online
+                        if result["subtitle"] == nil,
+                           let subtitleURL,
+                           let values = try? subtitleURL.resourceValues(forKeys: [.fileSizeKey]),
+                           (values.fileSize ?? 0) <= 20 * 1_024 * 1_024,
+                           let data = try? Data(contentsOf: subtitleURL) {
+                            result["subtitle"] = [
+                                "name": subtitleURL.lastPathComponent,
+                                "content": String(decoding: data, as: UTF8.self),
+                            ]
+                        }
+                    }
+                    self?.respond(identifier: identifier, result: result)
+                }
+            } catch OnlineMediaError.cancelled {
+                self.emitEvent(named: "analyse:media-preparation", detail: [
+                    "operationId": operationID,
+                    "stage": "cancelled",
+                    "progress": 0,
+                    "message": "Téléchargement annulé",
+                    "cancellable": false,
+                ])
+                self.respond(identifier: identifier, result: ["cancelled": true, "operationId": operationID])
+            } catch {
+                self.emitEvent(named: "analyse:media-preparation", detail: [
+                    "operationId": operationID,
+                    "stage": "failed",
+                    "progress": 0,
+                    "message": error.localizedDescription,
+                    "cancellable": false,
+                ])
+                self.respond(identifier: identifier, result: [
+                    "cancelled": false,
+                    "error": error.localizedDescription,
+                    "operationId": operationID,
+                ])
             }
         }
     }
@@ -2016,6 +2243,18 @@ final class NativeBridge: NSObject, WKScriptMessageHandler {
     private static func isProject(_ url: URL) -> Bool {
         ["cinecrique", "json"].contains(url.pathExtension.lowercased())
     }
+
+    private static let fountainExtensions: Set<String> = ["fountain", "spmd"]
+
+    private static func isFountain(_ url: URL) -> Bool {
+        fountainExtensions.contains(url.pathExtension.lowercased())
+    }
+
+    private static let fountainTypes: [UTType] = {
+        var types = fountainExtensions.compactMap { UTType(filenameExtension: $0) }
+        types.append(.plainText)
+        return types
+    }()
 
     private static let projectType = UTType(exportedAs: "app.cinecrique.project", conformingTo: .data)
 

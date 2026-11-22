@@ -1,3 +1,4 @@
+import { notesForExport } from "./notes.js";
 import { normalizeShot, shotRows } from "./shots.js";
 
 export const MAX_REPORT_IMAGES = 100;
@@ -89,7 +90,7 @@ export function buildReportModel({
         comment: text(marker.detail, 20_000),
       };
     }) : [],
-    analysis: options.analysis ? text(analysis, 2_000_000) : "",
+    analysis: options.analysis ? text(notesForExport(analysis, sourceMarkers, timecode), 2_000_000) : "",
     scenes: (Array.isArray(scenes) ? scenes : []).filter((scene) => sceneIndexes.has(scene.index)).slice(0, 500).map((scene) => ({
       heading: text(scene.heading, 500),
       content: text(String(script || "").slice(scene.start, scene.end), 2_000_000),

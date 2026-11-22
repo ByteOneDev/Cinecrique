@@ -1,3 +1,5 @@
+import { notesForExport } from "./notes.js";
+
 export const defaultExportSelection = () => ({
   script: true,
   analysis: false,
@@ -42,7 +44,12 @@ export function buildTextExportFiles(options, data) {
   if (options.script) {
     files.push({ name: `${base}-script.fountain`, content: data.script || "" });
   }
-  if (options.analysis) files.push({ name: `${base}-analyse.md`, content: data.analysis || "" });
+  if (options.analysis) {
+    files.push({
+      name: `${base}-analyse.md`,
+      content: notesForExport(data.analysis || "", data.markers, data.formatTimecode || ((value) => String(value))),
+    });
+  }
   if (options.markers) files.push({ name: `${base}-reperes.md`, content: markerMarkdown(data.markers, data.formatTimecode) });
   if (options.subtitles) files.push({ name: `${base}-sous-titres.vtt`, content: data.subtitlesVTT || "WEBVTT\n" });
   if (options.metadata) files.push({ name: `${base}-metadonnees.json`, content: JSON.stringify(data.metadata || {}, null, 2) });

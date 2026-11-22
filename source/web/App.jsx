@@ -20,8 +20,11 @@ import {
   DownloadSimple,
   FastForward,
   FileText,
+  FilmSlate,
   FilmStrip,
   FolderOpen,
+  Globe,
+  House,
   FrameCorners,
   Funnel,
   Image as ImageIcon,
@@ -100,6 +103,16 @@ import {
 import { buildTextExportFiles, defaultExportSelection, exportSelectionCount, safeExportBaseName } from "./export.js";
 import { defaultClipSettings, normalizeClipBasket, normalizeClipSettings } from "./clips.js";
 import { ExtractStudio } from "./ExtractStudio.jsx";
+import { ProjectCover } from "./ProjectCover.jsx";
+import { AppIconButton, ModalDialog } from "./ui.jsx";
+import { Launcher } from "./Launcher.jsx";
+import { NotesEditor } from "./NotesEditor.jsx";
+import { OnlineImportDialog } from "./OnlineImportDialog.jsx";
+import { PlanPicker } from "./PlanPicker.jsx";
+import { insertPlanEmbed, planEmbedToken } from "./notes.js";
+import { normalizeOnlineOptions, onlineProjectFields, onlineSourceLabel } from "./online.js";
+import { touchProject } from "./launcher.js";
+import { normalizeUpdateState } from "./update.js";
 import {
   buildReportModel,
   defaultReportSelection,
@@ -111,6 +124,15 @@ import {
   fountainContext,
   fountainSceneIndexAtOffset,
   fountainScenes,
+  fountainTitle,
+  insertPlanLinkAt,
+  markerSceneIndexes,
+  mergeImportedFountain,
+  normalizeFountainImport,
+  planLinkNote,
+  removePlanLinks,
+  scenePlanLinks,
+  setPlanScene,
 } from "./fountain.js";
 import {
   duplicateMarker,
@@ -302,19 +324,6 @@ function markerIcon(type, size = 16) {
   return <BookmarkSimple size={size} weight="fill" />;
 }
 
-function ProjectCover({ project, className = "", decorative = true }) {
-  const cover = normalizeProjectCover(project?.cover, project?.poster);
-  const image = projectCoverImage(project);
-  const text = projectCoverText(project);
-  return (
-    <div className={`project-cover mode-${cover.mode} ${className}`} aria-label={decorative ? undefined : `Couverture de ${project?.title || "Projet"}`} aria-hidden={decorative || undefined}>
-      {image && <img className="project-cover-image" src={image} alt="" />}
-      {cover.mode === "text" && <span className={text.length > 28 ? "long" : ""}>{text}</span>}
-      {cover.mode === "logo" && <img className="project-cover-logo" src="./assets/cinecrique-mark.svg" alt="" />}
-    </div>
-  );
-}
-
 function browserCoverDataURL(file) {
   return new Promise((resolve, reject) => {
     if (!file?.type?.startsWith("image/") || file.size > 20 * 1_024 * 1_024) {
@@ -340,6 +349,13 @@ function browserCoverDataURL(file) {
   });
 }
 
+function endOfLine(text, offset) {
+  const value = String(text || "");
+  const position = Math.min(Math.max(Number(offset) || 0, 0), value.length);
+  const lineEnd = value.indexOf("\n", position);
+  return lineEnd < 0 ? value.length : lineEnd;
+}
+
 function persistableMigratedState(state) {
   return {
     version: 6,
@@ -351,6 +367,8 @@ function persistableMigratedState(state) {
       projectRailCollapsed: Boolean(state.preferences?.projectRailCollapsed),
       muted: Boolean(state.preferences?.muted),
       shortcuts: normalizeShortcuts(state.preferences?.shortcuts),
+      launcherSort: state.preferences?.launcherSort || "recent",
+      onlineImport: normalizeOnlineOptions(state.preferences?.onlineImport),
     },
   };
 }
@@ -1004,6 +1022,9 @@ function PlansView({
   onResetFilters,
   loadThumbnail,
   fallbackThumbnail,
+  scenes = [],
+  sceneIndexesByMarker = new Map(),
+  onSceneChange,
   formatTimecode: formatPlanTimecode,
   formatDuration,
 }) {
@@ -1026,7 +1047,7 @@ function PlansView({
           <div className="plans-table-wrap">
             <table className="plans-table">
               <thead><tr>
-                <th>Miniature</th><th>{heading("start", "Début")}</th><th>{heading("end", "Fin")}</th><th>{heading("duration", "Durée")}</th><th>{heading("title", "Titre")}</th><th>{heading("shotType", "Type de plan")}</th><th>{heading("movement", "Mouvement")}</th><th>{heading("characters", "Personnages")}</th><th>{heading("sound", "Son")}</th><th>{heading("tag", "Tag")}</th><th>Commentaire</th>
+                <th>Miniature</th><th>{heading("start", "Début")}</th><th>{heading("end", "Fin")}</th><th>{heading("duration", "Durée")}</th><th>{heading("title", "Titre")}</th><th>{heading("shotType", "Type de plan")}</th><th>{heading("movement", "Mouvement")}</th><th>{heading("characters", "Personnages")}</th><th>{heading("sound", "Son")}</th><th>{heading("tag", "Tag")}</th><th>Scène</th><th>Commentaire</th>
               </tr></thead>
               <tbody>
                 {rows.map((marker) => {
@@ -1043,6 +1064,20 @@ function PlansView({
                       <td><input value={shot.characters} aria-label="Personnages du plan" onClick={(event) => event.stopPropagation()} onChange={(event) => onUpdateField(marker.id, "characters", event.target.value)} /></td>
                       <td><input value={shot.sound} aria-label="Son du plan" onClick={(event) => event.stopPropagation()} onChange={(event) => onUpdateField(marker.id, "sound", event.target.value)} /></td>
                       <td><input value={marker.tag || ""} aria-label="Tag du plan" onClick={(event) => event.stopPropagation()} onChange={(event) => onUpdateField(marker.id, "tag", event.target.value)} /></td>
+                      <td>
+                        <select
+                          className="shot-scene-select"
+                          aria-label={`Scène du scénario liée à ${marker.title}`}
+                          value={sceneIndexesByMarker.get(String(marker.id))?.[0] ?? ""}
+                          onClick={(event) => event.stopPropagation()}
+                          onKeyDown={(event) => event.stopPropagation()}
+                          onChange={(event) => onSceneChange?.(marker, event.target.value)}
+                          disabled={!scenes.length}
+                        >
+                          <option value="">{scenes.length ? "Aucune" : "Pas de scène"}</option>
+                          {scenes.map((scene) => <option key={scene.index} value={scene.index}>{`${scene.number}. ${scene.heading}`.slice(0, 60)}</option>)}
+                        </select>
+                      </td>
                       <td><input value={marker.detail || ""} aria-label="Commentaire du plan" onClick={(event) => event.stopPropagation()} onChange={(event) => onUpdateField(marker.id, "comment", event.target.value)} /></td>
                     </tr>
                   );
@@ -1059,92 +1094,6 @@ function PlansView({
         <div className="plans-empty"><FilmStrip size={24} /><strong>Aucun repère de plage.</strong><span>Créez une plage pour décrire un plan.</span><button type="button" onClick={onCreateRange}><Plus size={15} /> Créer un plan</button></div>
       )}
     </section>
-  );
-}
-
-function ModalDialog({
-  open,
-  onClose,
-  labelledBy,
-  className,
-  as: Element = "div",
-  initialFocusRef,
-  returnFocusRef: explicitReturnFocusRef,
-  children,
-  ...props
-}) {
-  const dialogRef = useRef(null);
-  const capturedReturnFocusRef = useRef(null);
-  const onCloseRef = useRef(onClose);
-
-  useEffect(() => {
-    onCloseRef.current = onClose;
-  }, [onClose]);
-
-  useEffect(() => {
-    if (!open) return undefined;
-    capturedReturnFocusRef.current = explicitReturnFocusRef?.current || document.activeElement;
-    const dialog = dialogRef.current;
-    const focusableSelector = "button:not(:disabled), input:not(:disabled), textarea:not(:disabled), select:not(:disabled), [tabindex]:not([tabindex='-1'])";
-    const focusInitial = () => {
-      const target = initialFocusRef?.current || dialog?.querySelector(focusableSelector) || dialog;
-      target?.focus();
-    };
-    const frame = requestAnimationFrame(focusInitial);
-    const handleKeyDown = (event) => {
-      if (event.key === "Escape") {
-        event.preventDefault();
-        onCloseRef.current();
-        return;
-      }
-      if (event.key !== "Tab" || !dialog) return;
-      const focusable = [...dialog.querySelectorAll(focusableSelector)];
-      if (!focusable.length) {
-        event.preventDefault();
-        dialog.focus();
-        return;
-      }
-      const first = focusable[0];
-      const last = focusable.at(-1);
-      if (event.shiftKey && document.activeElement === first) {
-        event.preventDefault();
-        last.focus();
-      } else if (!event.shiftKey && document.activeElement === last) {
-        event.preventDefault();
-        first.focus();
-      }
-    };
-    document.addEventListener("keydown", handleKeyDown);
-    return () => {
-      cancelAnimationFrame(frame);
-      document.removeEventListener("keydown", handleKeyDown);
-      capturedReturnFocusRef.current?.focus?.();
-    };
-  }, [explicitReturnFocusRef, initialFocusRef, open]);
-
-  if (!open) return null;
-  return (
-    <div className="modal-backdrop" onMouseDown={(event) => event.target === event.currentTarget && onClose()}>
-      <Element
-        ref={dialogRef}
-        className={className}
-        role="dialog"
-        aria-modal="true"
-        aria-labelledby={labelledBy}
-        tabIndex={-1}
-        {...props}
-      >
-        {children}
-      </Element>
-    </div>
-  );
-}
-
-function AppIconButton({ label, active = false, children, className = "", buttonRef, ...props }) {
-  return (
-    <button ref={buttonRef} className={`icon-button ${active ? "active" : ""} ${className}`} aria-label={label} title={label} {...props}>
-      {children}
-    </button>
   );
 }
 
@@ -1184,7 +1133,18 @@ export function App() {
   const [sceneSelectionRequest, setSceneSelectionRequest] = useState(null);
   const [leftPanel, setLeftPanel] = useState(57);
   const [projectRailCollapsed, setProjectRailCollapsed] = useState(false);
-  const [archivesOpen, setArchivesOpen] = useState(false);
+  const [view, setView] = useState("launcher");
+  const [launcherQuery, setLauncherQuery] = useState("");
+  const [launcherSort, setLauncherSort] = useState("recent");
+  const [onlineImport, setOnlineImport] = useState(null);
+  const [onlineOptions, setOnlineOptions] = useState(() => normalizeOnlineOptions());
+  const [onlineToolStatus, setOnlineToolStatus] = useState(null);
+  const [onlineToolBusy, setOnlineToolBusy] = useState(false);
+  const [pendingFountain, setPendingFountain] = useState(null);
+  const [planPicker, setPlanPicker] = useState(null);
+  const [appVersion, setAppVersion] = useState("");
+  const [updateState, setUpdateState] = useState(() => normalizeUpdateState());
+  const [autoUpdate, setAutoUpdate] = useState(true);
   const [projectMenu, setProjectMenu] = useState(null);
   const [pendingProjectImport, setPendingProjectImport] = useState(null);
   const [importResolving, setImportResolving] = useState(false);
@@ -1243,6 +1203,12 @@ export function App() {
   const viewerRef = useRef(null);
   const fileInputRef = useRef(null);
   const projectInputRef = useRef(null);
+  const fountainInputRef = useRef(null);
+  const fountainIntentRef = useRef("project");
+  const scriptCaretRef = useRef(null);
+  const notesCaretRef = useRef(null);
+  const viewRef = useRef("launcher");
+  const projectWithoutMediaRef = useRef(false);
   const videoRef = useRef(null);
   const playbackDirectionRef = useRef(0);
   const reverseFrameRef = useRef(null);
@@ -1301,12 +1267,6 @@ export function App() {
     (value) => formatTimecodeDuration(value, timecodeSettings),
     [timecodeSettings],
   );
-  const activeProjectEntries = useMemo(() => projectList
-    .map((project, index) => ({ project, index }))
-    .filter(({ project }) => !project.archived), [projectList]);
-  const archivedProjectEntries = useMemo(() => projectList
-    .map((project, index) => ({ project, index }))
-    .filter(({ project }) => project.archived), [projectList]);
   const projectMenuTarget = projectList.find((project) => project.id === projectMenu?.projectId) || null;
   const renamingProject = projectList.find((project) => project.id === renamingProjectId) || null;
   const coverEditorProject = projectList.find((project) => project.id === coverEditorProjectId) || null;
@@ -1322,7 +1282,10 @@ export function App() {
   const storedAnnotations = selectedMarkerId == null ? [] : annotationsByMarker[selectedMarkerId] || [];
   const annotations = annotationsAtTime(storedAnnotations, currentTime, selectedMarker.time, frameRate);
   const selectedAnnotation = annotations.find((annotation) => annotation.id === selectedAnnotationId) || null;
-  const currentSubtitle = subtitleAt(subtitleCues, currentTime) || (!mediaSource ? "Ce n’est pas le mépris. C’est l’indifférence." : "");
+  const isDemoProject = String(activeProject?.id || "").startsWith("demo-");
+  const projectWithoutMedia = Boolean(activeProject) && !activeProject.path && !isDemoProject;
+  projectWithoutMediaRef.current = projectWithoutMedia;
+  const currentSubtitle = subtitleAt(subtitleCues, currentTime) || (!mediaSource && isDemoProject ? "Ce n’est pas le mépris. C’est l’indifférence." : "");
   const activeSubtitleIndex = subtitleIndexAt(subtitleCues, currentTime);
   const filteredSubtitleCues = useMemo(
     () => filterSubtitles(subtitleCues, transcriptSearch),
@@ -1358,6 +1321,10 @@ export function App() {
   );
   const completionContext = useMemo(() => fountainContext(script, activeProject), [activeProject, script]);
   const scriptScenes = useMemo(() => fountainScenes(script), [script]);
+  const planLinksByScene = useMemo(() => scenePlanLinks(script, scriptScenes), [script, scriptScenes]);
+  const sceneIndexesByMarker = useMemo(() => markerSceneIndexes(script, scriptScenes), [script, scriptScenes]);
+  const markerById = useMemo(() => new Map(markers.map((marker) => [String(marker.id), marker])), [markers]);
+  const currentScenePlans = planLinksByScene.get(scene - 1) || [];
   const annotatedFrames = useMemo(() => markers.flatMap((marker) => {
     const markerAnnotations = annotationsByMarker[marker.id] || [];
     return markerAnnotations.length ? [{ marker, annotations: markerAnnotations }] : [];
@@ -1399,8 +1366,8 @@ export function App() {
     projects: projectList.map(withoutMediaRuntime),
     activeProjectId: activeProject?.id || null,
     documents: activeProject?.id ? { ...documents, [activeProject.id]: currentDocument } : documents,
-    preferences: { leftPanel, projectRailCollapsed, muted: isMuted, shortcuts },
-  }), [activeProject?.id, currentDocument, documents, isMuted, leftPanel, projectList, projectRailCollapsed, shortcuts]);
+    preferences: { leftPanel, projectRailCollapsed, muted: isMuted, shortcuts, launcherSort, onlineImport: onlineOptions },
+  }), [activeProject?.id, currentDocument, documents, isMuted, launcherSort, leftPanel, onlineOptions, projectList, projectRailCollapsed, shortcuts]);
 
   const saveNow = useCallback(async (state) => {
     if (!hydrated) return { saved: false, revision: 0 };
@@ -1475,6 +1442,8 @@ export function App() {
     setDuration(metadataDuration(nextProject?.metadata, nextProject?.path ? 1 : DURATION));
     setLeftPanel(migrated.preferences.leftPanel);
     setProjectRailCollapsed(migrated.preferences.projectRailCollapsed);
+    setLauncherSort(migrated.preferences.launcherSort || "recent");
+    setOnlineOptions(normalizeOnlineOptions(migrated.preferences.onlineImport));
     setIsMuted(migrated.preferences.muted);
     setShortcuts(normalizeShortcuts(migrated.preferences.shortcuts));
     setSearch("");
@@ -1629,6 +1598,8 @@ export function App() {
     return request;
   }, [activeProject?.mediaMissing, mediaPath, nativeMode]);
 
+  const loadNotesFrame = useCallback((time) => loadComparisonFrame({ time }), [loadComparisonFrame]);
+
   const pinCurrentComparison = (slot) => {
     const frameTolerance = 0.5 / Math.max(frameRate, 1);
     const markerId = selectedMarker?.id != null && Math.abs(Number(selectedMarker.time) - currentTime) <= frameTolerance
@@ -1745,13 +1716,20 @@ export function App() {
     }
     if (!result.path) return;
     const id = `local:${result.path}`;
-    const title = result.name.replace(/\.[^.]+$/, "");
+    const fileTitle = result.name.replace(/\.[^.]+$/, "");
+    const online = result.online ? onlineProjectFields(result.online, fileTitle) : null;
+    const title = online?.title || fileTitle;
+    const onlineCover = result.online?.thumbnailDataURL
+      ? normalizeProjectCover({ mode: "image", source: "local", value: result.online.thumbnailDataURL })
+      : null;
     const newProject = {
       id,
       title,
-      detail: projectDetail(result.metadata),
+      detail: online?.detail || projectDetail(result.metadata),
       poster: "./assets/poster-coast.png",
-      cover: { mode: "logo" },
+      cover: onlineCover?.mode === "image" ? onlineCover : { mode: "logo" },
+      ...(online ? { source: online.source } : {}),
+      lastOpenedAt: Date.now(),
       path: result.path,
       playbackPath: result.playbackPath || result.path,
       mediaURL: result.mediaURL,
@@ -1774,6 +1752,8 @@ export function App() {
       ? projectList.map((project, index) => index === existingIndex ? {
         ...project,
         ...newProject,
+        title: online ? newProject.title : project.title || newProject.title,
+        cover: onlineCover?.mode === "image" ? onlineCover : project.cover || newProject.cover,
         timecode: project.timecode?.source === "manual"
           ? normalizeTimecodeSettings(project.timecode, metadataFrameRate(result.metadata, FPS))
           : newProject.timecode,
@@ -1798,7 +1778,8 @@ export function App() {
     const proxyLabel = result.proxyUsed
       ? result.proxyMode === "remux" ? " · proxy sans perte" : " · proxy compatible"
       : "";
-    setToast(`${result.name} ouvert localement${proxyLabel}`);
+    setView("workspace");
+    setToast(online ? `${title} téléchargé et ouvert${proxyLabel}` : `${result.name} ouvert localement${proxyLabel}`);
   }, [activeProject?.id, applyDocument, currentDocument, documents, projectList]);
 
   const applySubtitleResult = useCallback((result) => {
@@ -1933,6 +1914,36 @@ export function App() {
     }
   }, [activeProject, nativeMode, pauseTransport, prepareExistingPlayback]);
 
+  const attachMediaResult = useCallback((result) => {
+    if (!activeProject?.id || !result?.path) return;
+    const online = result.online ? onlineProjectFields(result.online, activeProject.title) : null;
+    const replacement = {
+      ...activeProject,
+      ...(online ? { source: online.source } : {}),
+      ...(!activeProject.path ? { detail: online?.detail || projectDetail(result.metadata) } : {}),
+      path: result.path,
+      playbackPath: result.playbackPath || result.path,
+      mediaURL: result.mediaURL,
+      mediaMissing: false,
+      proxyMissing: false,
+      proxyUsed: Boolean(result.proxyUsed),
+      proxyMode: result.proxyMode || "",
+      metadata: result.metadata || activeProject.metadata || null,
+      metadataError: result.metadataError || "",
+      timecode: activeProject.timecode?.source === "manual"
+        ? activeProject.timecode
+        : normalizeTimecodeSettings({ source: "auto" }, metadataFrameRate(result.metadata || activeProject.metadata, FPS)),
+    };
+    setProjectList((current) => current.map((project) => project.id === activeProject.id ? replacement : project));
+    setMediaSource(result.mediaURL || "");
+    setMediaPath(result.playbackPath || result.path || "");
+    setMediaPlaybackError("");
+    setFileMetadata(replacement.metadata);
+    setDuration(metadataDuration(replacement.metadata, 1));
+    if (result.subtitle && !subtitleCues.length) applySubtitleResult(result.subtitle);
+    setToast(online ? "Vidéo en ligne associée au projet" : "Média relié au projet");
+  }, [activeProject, applySubtitleResult, subtitleCues.length]);
+
   const relinkMedia = useCallback(async () => {
     if (!nativeMode || !activeProject?.id) return;
     try {
@@ -1940,33 +1951,11 @@ export function App() {
       setMediaPreparation((current) => !current || current.operationId === result?.operationId ? null : current);
       if (!result || result.cancelled) return;
       if (result.error) throw new Error(result.error);
-      const replacement = {
-        ...activeProject,
-        path: result.path,
-        playbackPath: result.playbackPath || result.path,
-        mediaURL: result.mediaURL,
-        mediaMissing: false,
-        proxyMissing: false,
-        proxyUsed: Boolean(result.proxyUsed),
-        proxyMode: result.proxyMode || "",
-        metadata: result.metadata || activeProject.metadata || null,
-        metadataError: result.metadataError || "",
-        timecode: activeProject.timecode?.source === "manual"
-          ? activeProject.timecode
-          : normalizeTimecodeSettings({ source: "auto" }, metadataFrameRate(result.metadata || activeProject.metadata, FPS)),
-      };
-      setProjectList((current) => current.map((project) => project.id === activeProject.id ? replacement : project));
-      setMediaSource(result.mediaURL || "");
-      setMediaPath(result.playbackPath || result.path || "");
-      setMediaPlaybackError("");
-      setFileMetadata(replacement.metadata);
-      setDuration(metadataDuration(replacement.metadata, 1));
-      if (result.subtitle && !subtitleCues.length) applySubtitleResult(result.subtitle);
-      setToast("Média relié au projet");
+      attachMediaResult(result);
     } catch (error) {
       setToast(error.message);
     }
-  }, [activeProject, applySubtitleResult, nativeMode, subtitleCues.length]);
+  }, [activeProject?.id, attachMediaResult, nativeMode]);
 
   const importProjectFile = useCallback(async (file) => {
     if (!file) return;
@@ -2229,13 +2218,49 @@ export function App() {
     ? { ...documents, [activeProject.id]: currentDocument }
     : documents), [activeProject?.id, currentDocument, documents]);
 
-  const selectProjectAt = useCallback((index) => {
-    const nextProject = projectList[index];
-    if (!nextProject || nextProject.archived || nextProject.id === activeProject?.id) return;
-    applyProjectCollection(projectList, documentsIncludingActive(), nextProject.id);
+  const openProjectFromLauncher = useCallback((projectId) => {
+    const target = projectList.find((project) => project.id === projectId);
+    if (!target) return;
+    let nextProjects = target.archived ? setProjectArchived(projectList, projectId, false) : projectList;
+    nextProjects = touchProject(nextProjects, projectId);
+    if (projectId !== activeProject?.id || target.archived) {
+      applyProjectCollection(nextProjects, documentsIncludingActive(), projectId);
+    } else {
+      setProjectList(nextProjects);
+    }
     setProjectMenu(null);
-    setToast(nextProject.mediaMissing ? "Média introuvable : reliez le fichier pour reprendre la lecture." : `${nextProject.title} ouvert`);
+    setView("workspace");
+    setToast(target.mediaMissing
+      ? "Média introuvable : reliez le fichier pour reprendre la lecture."
+      : target.archived ? `${target.title} restauré et ouvert` : `${target.title} ouvert`);
   }, [activeProject?.id, applyProjectCollection, documentsIncludingActive, projectList]);
+
+  const createProject = useCallback(({ title, script: initialScriptText = "", detail = "" } = {}) => {
+    const id = `projet:${crypto.randomUUID()}`;
+    const project = {
+      id,
+      title: String(title || "Nouveau projet").trim().slice(0, 500) || "Nouveau projet",
+      detail: detail || (initialScriptText ? "Scénario Fountain" : "Projet sans vidéo"),
+      poster: "./assets/poster-coast.png",
+      cover: { mode: "logo" },
+      archived: false,
+      lastOpenedAt: Date.now(),
+      timecode: normalizeTimecodeSettings({ source: "auto" }, FPS),
+    };
+    const document = { ...emptyDocument(), script: initialScriptText || "INT. " };
+    applyProjectCollection([project, ...projectList], { ...documentsIncludingActive(), [id]: document }, id);
+    setActiveEditorTab(initialScriptText ? "script" : "notes");
+    setView("workspace");
+    setToast(initialScriptText ? `Projet « ${project.title} » créé depuis le scénario` : "Projet vide créé");
+  }, [applyProjectCollection, documentsIncludingActive, projectList]);
+
+  const goHome = useCallback(() => {
+    pauseTransport();
+    setStudioOpen(false);
+    setPlanPicker(null);
+    setLauncherQuery("");
+    setView("launcher");
+  }, [pauseTransport]);
 
   const openProjectMenu = useCallback((projectId, event, trigger = null) => {
     event.preventDefault();
@@ -2374,7 +2399,6 @@ export function App() {
       : activeProject?.id ?? (willArchive ? null : projectMenuTarget.id);
     applyProjectCollection(nextProjects, nextDocuments, nextActiveId);
     setProjectMenu(null);
-    if (willArchive) setArchivesOpen(true);
     setToast(willArchive ? "Projet archivé" : "Projet restauré");
   };
 
@@ -2400,6 +2424,250 @@ export function App() {
     });
   };
 
+  const handleFountainContent = useCallback(({ name, content }, intent) => {
+    try {
+      const text = normalizeFountainImport(content);
+      const title = fountainTitle(text) || String(name || "Scénario").replace(/\.[^.]+$/, "");
+      if (intent === "project" || !activeProject) {
+        createProject({ title, script: text });
+        return;
+      }
+      setPendingFountain({ name: String(name || "Scénario"), text, title });
+    } catch (error) {
+      setToast(`Import impossible : ${error.message}`);
+    }
+  }, [activeProject, createProject]);
+
+  const requestFountainImport = useCallback(async (intent = "script") => {
+    if (!nativeMode) {
+      fountainIntentRef.current = intent;
+      fountainInputRef.current?.click();
+      return;
+    }
+    try {
+      const result = await nativeBridge.call("openFountain");
+      if (!result || result.cancelled) return;
+      if (result.error) throw new Error(result.error);
+      handleFountainContent({ name: result.name, content: result.content }, intent);
+    } catch (error) {
+      setToast(`Import impossible : ${error.message}`);
+    }
+  }, [handleFountainContent, nativeMode]);
+
+  const importBrowserFountain = async (file) => {
+    if (!file) return;
+    if (file.size > 8 * 1_024 * 1_024) {
+      setToast("Ce scénario dépasse la limite de 8 Mo.");
+      return;
+    }
+    handleFountainContent({ name: file.name, content: await file.text() }, fountainIntentRef.current);
+  };
+
+  const resolveFountainImport = (mode) => {
+    const pending = pendingFountain;
+    if (!pending) return;
+    setPendingFountain(null);
+    if (mode === "project") {
+      createProject({ title: pending.title, script: pending.text });
+      return;
+    }
+    setScript((current) => mergeImportedFountain(current, pending.text, mode));
+    setActiveEditorTab("script");
+    setSceneSelectionRequest(null);
+    setToast(mode === "replace" ? "Scénario remplacé par le fichier Fountain" : "Scénario Fountain ajouté à la fin");
+  };
+
+  const refreshOnlineTool = useCallback(async () => {
+    if (!nativeMode) return;
+    try {
+      setOnlineToolStatus(await nativeBridge.call("onlineToolStatus"));
+    } catch (error) {
+      setOnlineToolStatus({ available: false, error: error.message });
+    }
+  }, [nativeMode]);
+
+  const openOnlineImport = useCallback((target = "new") => {
+    setOnlineImport({ target: target === "attach" && activeProject ? "attach" : "new" });
+    void refreshOnlineTool();
+  }, [activeProject, refreshOnlineTool]);
+
+  const installOnlineTool = async () => {
+    setOnlineToolBusy(true);
+    try {
+      const status = await nativeBridge.call("installOnlineTool");
+      setOnlineToolStatus(status);
+      setToast(status?.version ? `Moteur yt-dlp ${status.version} prêt` : "Moteur de téléchargement prêt");
+    } catch (error) {
+      setToast(`Installation impossible : ${error.message}`);
+    } finally {
+      setOnlineToolBusy(false);
+    }
+  };
+
+  const startOnlineImport = async ({ url, options }) => {
+    const target = onlineImport?.target || "new";
+    setOnlineImport(null);
+    if (!nativeMode) {
+      setToast("L’import en ligne est disponible dans l’application macOS.");
+      return;
+    }
+    const operationId = `online-${crypto.randomUUID()}`;
+    setMediaPreparation({
+      operationId,
+      name: onlineSourceLabel(url) || "Vidéo en ligne",
+      stage: "download",
+      progress: 0,
+      message: "Connexion au service…",
+      cancellable: true,
+      cancelling: false,
+    });
+    try {
+      const result = await nativeBridge.call("downloadOnlineVideo", { url, operationId, ...options });
+      setMediaPreparation((current) => !current || current.operationId === operationId ? null : current);
+      if (!result || result.cancelled) {
+        setToast("Téléchargement annulé");
+        return;
+      }
+      if (result.error) throw new Error(result.error);
+      if (target === "attach") attachMediaResult(result);
+      else applyVideoResult(result);
+    } catch (error) {
+      setMediaPreparation((current) => !current || current.operationId === operationId ? null : current);
+      setToast(`Téléchargement impossible : ${error.message}`);
+    }
+  };
+
+  const resolvePickedMarker = (marker) => {
+    if (marker) return marker;
+    const tolerance = 0.5 / Math.max(frameRate, 1);
+    const selected = markers.find((candidate) => candidate.id === selectedMarkerId);
+    const existing = selected && Math.abs(Number(selected.time) - currentTime) <= tolerance
+      ? selected
+      : markers.find((candidate) => Math.abs(Number(candidate.time) - currentTime) <= tolerance);
+    if (existing) return existing;
+    const created = {
+      id: crypto.randomUUID(),
+      time: currentTime,
+      title: `Plan ${displayTimecode(currentTime)}`,
+      detail: "",
+      tag: "Plan",
+      type: "frame",
+      color: "#4fbd7f",
+    };
+    setMarkers((current) => [...current, created].sort((a, b) => a.time - b.time));
+    setSelectedMarkerId(created.id);
+    return created;
+  };
+
+  const pickPlan = (marker) => {
+    const target = resolvePickedMarker(marker);
+    if (planPicker?.target === "notes") {
+      const token = planEmbedToken(target);
+      if (!token) {
+        setToast("Ce repère importé ne peut pas être inséré : son identifiant n’est pas pris en charge.");
+        return;
+      }
+      setAnalysis((current) => insertPlanEmbed(current, endOfLine(current, notesCaretRef.current ?? current.length), token).markdown);
+      setToast("Plan inséré dans les notes");
+    } else {
+      const note = planLinkNote(target, displayTimecode);
+      if (!note) {
+        setToast("Ce repère importé ne peut pas être lié : son identifiant n’est pas pris en charge.");
+        return;
+      }
+      setScript((current) => {
+        const fallback = scriptScenes[scene - 1] ? scriptScenes[scene - 1].start : current.length;
+        return insertPlanLinkAt(current, endOfLine(current, scriptCaretRef.current ?? fallback), note).script;
+      });
+      setToast(`Plan lié à la scène ${scene}`);
+    }
+    setPlanPicker(null);
+  };
+
+  const changePlanScene = (marker, value) => {
+    const sceneIndex = value === "" ? null : Number(value);
+    const note = planLinkNote(marker, displayTimecode);
+    if (!note) {
+      setToast("Ce repère importé ne peut pas être lié au scénario.");
+      return;
+    }
+    setScript((current) => setPlanScene(current, marker.id, sceneIndex, note));
+    setToast(sceneIndex == null ? "Plan délié du scénario" : `Plan lié à la scène ${sceneIndex + 1}`);
+  };
+
+  const unlinkScenePlan = (markerId) => {
+    setScript((current) => removePlanLinks(current, markerId));
+    setToast("Plan délié du scénario");
+  };
+
+  const annotationsForMarker = useCallback(
+    (marker) => annotationsAtTime(annotationsByMarker[marker.id] || [], marker.time, marker.time, frameRate),
+    [annotationsByMarker, frameRate],
+  );
+
+  const addMarkerAnnotation = useCallback((marker, annotation) => {
+    setAnnotationsByMarker((current) => ({
+      ...current,
+      [marker.id]: [...(current[marker.id] || []), { ...annotation, time: marker.time }],
+    }));
+  }, []);
+
+  const updateMarkerAnnotation = useCallback((marker, annotationId, next) => {
+    setAnnotationsByMarker((current) => ({
+      ...current,
+      [marker.id]: (current[marker.id] || []).map((annotation) => (annotation.id === annotationId ? next : annotation)),
+    }));
+  }, []);
+
+  const deleteMarkerAnnotation = useCallback((marker, annotationId) => {
+    setAnnotationsByMarker((current) => ({
+      ...current,
+      [marker.id]: (current[marker.id] || []).filter((annotation) => annotation.id !== annotationId),
+    }));
+  }, []);
+
+  const renameMarker = useCallback((markerId, title) => {
+    setMarkers((current) => current.map((marker) => (marker.id === markerId ? { ...marker, title: String(title).slice(0, 200) } : marker)));
+  }, []);
+
+  const seekNotesPlan = (marker, time) => {
+    pauseTransport();
+    if (marker) {
+      setSelectedMarkerId(marker.id);
+      setSelectedAnnotationId(null);
+    }
+    seekTo(Number(time) || 0);
+  };
+
+  const checkForUpdates = async () => {
+    if (!nativeMode) return;
+    try {
+      setUpdateState(normalizeUpdateState(await nativeBridge.call("checkForUpdates")));
+    } catch (error) {
+      setUpdateState(normalizeUpdateState({ stage: "failed", message: error.message }));
+    }
+  };
+
+  const installUpdate = async () => {
+    if (!nativeMode) return;
+    try {
+      await saveNow();
+      setUpdateState(normalizeUpdateState(await nativeBridge.call("installUpdate")));
+    } catch (error) {
+      setUpdateState(normalizeUpdateState({ stage: "failed", message: error.message }));
+    }
+  };
+
+  const changeAutoUpdate = async (enabled) => {
+    setAutoUpdate(enabled);
+    if (!nativeMode) return;
+    try {
+      await nativeBridge.call("setAutoUpdate", { enabled });
+    } catch (error) {
+      setToast(error.message);
+    }
+  };
+
   const handleMediaPreparation = useCallback((detail) => {
     if (!detail?.operationId) return;
     if (["complete", "cancelled", "failed"].includes(detail.stage)) {
@@ -2421,9 +2689,52 @@ export function App() {
     if (!nativeMode) return undefined;
     let cancelled = false;
     nativeBridge.call("applicationInfo")
-      .then((info) => !cancelled && setClipExportAvailable(Boolean(info?.clipExportAvailable)))
+      .then((info) => {
+        if (cancelled) return;
+        setClipExportAvailable(Boolean(info?.clipExportAvailable));
+        setAppVersion(String(info?.version || ""));
+      })
+      .catch(() => undefined);
+    nativeBridge.call("updateStatus")
+      .then((status) => {
+        if (cancelled || !status) return;
+        setUpdateState(normalizeUpdateState(status));
+        setAutoUpdate(status.autoUpdate !== false);
+      })
       .catch(() => undefined);
     return () => { cancelled = true; };
+  }, [nativeMode]);
+
+  useEffect(() => {
+    viewRef.current = view;
+    if (!nativeMode) return;
+    nativeBridge.call("setWindowMode", { mode: view }).catch(() => undefined);
+  }, [nativeMode, view]);
+
+  useEffect(() => {
+    if (!nativeMode) return undefined;
+    return nativeBridge.on("analyse:check-updates-requested", () => {
+      setView("launcher");
+      setUpdateState(normalizeUpdateState({ stage: "checking" }));
+      nativeBridge.call("checkForUpdates")
+        .then((status) => setUpdateState(normalizeUpdateState(status)))
+        .catch((error) => setUpdateState(normalizeUpdateState({ stage: "failed", message: error.message })));
+    });
+  }, [nativeMode]);
+
+  useEffect(() => {
+    if (!nativeMode) return undefined;
+    return nativeBridge.on("analyse:update-state", (detail) => {
+      const next = normalizeUpdateState(detail);
+      setUpdateState(next);
+      if (next.stage === "available" && viewRef.current === "workspace" && detail?.announce) {
+        setToast({
+          message: `Cinécrique ${next.version} est disponible`,
+          actionLabel: "Voir",
+          action: () => setView("launcher"),
+        });
+      }
+    });
   }, [nativeMode]);
 
   useEffect(() => {
@@ -2491,10 +2802,17 @@ export function App() {
         }
       }),
       nativeBridge.on("analyse:export-requested", () => setExportOpen(true)),
+      nativeBridge.on("analyse:fountain-dropped", (detail) => {
+        if (detail?.error) setToast(`Import impossible : ${detail.error}`);
+        else if (detail) handleFountainContent(detail, viewRef.current === "launcher" ? "project" : "script");
+      }),
+      nativeBridge.on("analyse:open-fountain-requested", () => void requestFountainImport(viewRef.current === "launcher" ? "project" : "script")),
+      nativeBridge.on("analyse:open-online-requested", () => openOnlineImport(viewRef.current === "launcher" ? "new" : projectWithoutMediaRef.current ? "attach" : "new")),
+      nativeBridge.on("analyse:show-launcher", goHome),
     ];
     nativeBridge.readyForEvents().catch((error) => setToast(error.message));
     return () => disposers.forEach((dispose) => dispose());
-  }, [applyProjectResult, applySubtitleResult, applyVideoResult, handleMediaPreparation, importSubtitle, importVideo, nativeMode, saveNow]);
+  }, [applyProjectResult, applySubtitleResult, applyVideoResult, goHome, handleFountainContent, handleMediaPreparation, importSubtitle, importVideo, nativeMode, openOnlineImport, requestFountainImport, saveNow]);
 
   useEffect(() => {
     if (!hydrated || !nativeMode || !activeProject?.proxyMissing || activeProject.mediaMissing || !activeProject.path) return;
@@ -2534,7 +2852,7 @@ export function App() {
 
   useEffect(() => {
     const handleTransportShortcut = (event) => {
-      if (event.repeat || studioOpen || document.querySelector("[role='dialog'][aria-modal='true']")) return;
+      if (event.repeat || studioOpen || viewRef.current !== "workspace" || document.querySelector("[role='dialog'][aria-modal='true']")) return;
       const action = transportShortcut(event, shortcuts);
       if (!action) return;
       event.preventDefault();
@@ -3264,37 +3582,9 @@ export function App() {
     ? projectMenuCohort.findIndex((project) => project.id === projectMenuTarget.id)
     : -1;
 
-  const renderProjectEntry = ({ project, index }, archived = false) => (
-    <div
-      key={project.id}
-      className={`project-item-shell ${archived ? "archived" : ""}`}
-      onContextMenu={(event) => openProjectMenu(project.id, event, event.currentTarget.querySelector(".project-item"))}
-    >
-      <button
-        className={`project-item ${selectedProject === index ? "selected" : ""}`}
-        onClick={archived
-          ? (event) => openProjectMenu(project.id, event, event.currentTarget)
-          : () => selectProjectAt(index)}
-        title={archived ? `${project.title} · archivé` : project.title}
-      >
-        <ProjectCover project={project} />
-        <span>{project.title}</span>
-      </button>
-      <button
-        type="button"
-        className="project-more-button"
-        aria-label={`Actions pour ${project.title}`}
-        aria-haspopup="menu"
-        aria-expanded={projectMenu?.projectId === project.id}
-        onClick={(event) => openProjectMenu(project.id, event, event.currentTarget)}
-      ><DotsThree size={16} weight="bold" /></button>
-      {archived && <Archive className="project-archive-badge" size={15} aria-hidden="true" />}
-    </div>
-  );
-
   return (
     <main
-      className={`app-shell ${resizing ? "is-resizing" : ""}`}
+      className={`app-shell view-${view} ${resizing ? "is-resizing" : ""}`}
       onDragOver={(event) => {
         if (!nativeMode) event.preventDefault();
       }}
@@ -3304,7 +3594,35 @@ export function App() {
         importFile(event.dataTransfer.files?.[0]);
       }}
     >
-      <header className="topbar">
+      {view === "launcher" && (
+        <Launcher
+          projects={projectList}
+          documents={documentsIncludingActive()}
+          activeProjectId={activeProject?.id || null}
+          query={launcherQuery}
+          onQueryChange={setLauncherQuery}
+          sort={launcherSort}
+          onSortChange={setLauncherSort}
+          onOpen={openProjectFromLauncher}
+          onProjectMenu={openProjectMenu}
+          projectMenuId={projectMenu?.projectId || null}
+          onImportVideo={importVideo}
+          onImportOnline={() => openOnlineImport("new")}
+          onImportFountain={() => void requestFountainImport("project")}
+          onNewProject={() => createProject({ title: "Nouveau projet" })}
+          onImportProject={importProject}
+          nativeMode={nativeMode}
+          appVersion={appVersion}
+          updateState={updateState}
+          autoUpdate={autoUpdate}
+          onAutoUpdateChange={(enabled) => void changeAutoUpdate(enabled)}
+          onCheckUpdates={() => void checkForUpdates()}
+          onInstallUpdate={() => void installUpdate()}
+          onOpenRelease={() => void openExternal(updateState.releaseURL)}
+        />
+      )}
+
+      <header className="topbar" hidden={view !== "workspace"}>
         <div className="window-controls" aria-label="Contrôles de fenêtre">
           <span className="window-dot close" />
           <span className="window-dot minimize" />
@@ -3323,7 +3641,7 @@ export function App() {
             <MagnifyingGlass size={17} />
             <input aria-label="Rechercher dans les repères" value={search} onChange={(event) => setSearch(event.target.value)} placeholder="Rechercher" maxLength={200} />
           </label>
-          <AppIconButton label="Importer un projet Cinécrique" onClick={importProject}><UploadSimple size={18} /></AppIconButton>
+          <AppIconButton label="Projets" onClick={goHome}><House size={18} /></AppIconButton>
           <AppIconButton
             label={studioOpen ? "Revenir à l’atelier d’analyse" : "Ouvrir le studio d’extraits"}
             active={studioOpen}
@@ -3389,6 +3707,49 @@ export function App() {
         </div>
       )}
 
+      <OnlineImportDialog
+        open={Boolean(onlineImport)}
+        target={onlineImport?.target}
+        options={onlineOptions}
+        onOptionsChange={setOnlineOptions}
+        nativeMode={nativeMode}
+        toolStatus={onlineToolStatus}
+        toolBusy={onlineToolBusy}
+        onInstallTool={() => void installOnlineTool()}
+        onClose={() => setOnlineImport(null)}
+        onSubmit={(request) => void startOnlineImport(request)}
+      />
+
+      <ModalDialog
+        open={Boolean(pendingFountain)}
+        onClose={() => setPendingFountain(null)}
+        labelledBy="fountain-import-title"
+        className="import-dialog"
+      >
+        <div className="composer-heading">
+          <div><span>Scénario Fountain</span><h2 id="fountain-import-title">Importer « {pendingFountain?.title} » ?</h2></div>
+          <AppIconButton label="Fermer" type="button" onClick={() => setPendingFountain(null)}><X size={19} /></AppIconButton>
+        </div>
+        <p>
+          <strong>{pendingFountain?.name}</strong> contient {fountainScenes(pendingFountain?.text || "").length} scène{fountainScenes(pendingFountain?.text || "").length > 1 ? "s" : ""}.
+          Les plans déjà liés restent dans le scénario actuel s’il est conservé.
+        </p>
+        <div className="import-choice-grid">
+          <button type="button" onClick={() => resolveFountainImport("append")}>
+            <Plus size={17} />
+            <span><strong>Ajouter à la fin</strong><small>Conserver le scénario actuel</small></span>
+          </button>
+          <button type="button" onClick={() => resolveFountainImport("project")}>
+            <FilmSlate size={17} />
+            <span><strong>Nouveau projet</strong><small>Ouvrir le scénario à part</small></span>
+          </button>
+          <button type="button" className="danger" onClick={() => resolveFountainImport("replace")}>
+            <ArrowCounterClockwise size={17} />
+            <span><strong>Remplacer</strong><small>Remplacer le scénario de ce projet</small></span>
+          </button>
+        </div>
+      </ModalDialog>
+
       <ModalDialog
         open={Boolean(pendingProjectImport)}
         onClose={() => !importResolving && void cancelProjectImport()}
@@ -3421,56 +3782,28 @@ export function App() {
         </div>
       </ModalDialog>
 
-      <div className={`app-body ${projectRailCollapsed ? "rail-collapsed" : ""}`} hidden={studioOpen}>
-        <aside className={`project-rail ${projectRailCollapsed ? "collapsed" : ""}`}>
-          <div className="rail-heading">
-            <span>Projets</span>
-            <AppIconButton
-              className="rail-toggle"
-              label={projectRailCollapsed ? "Déployer les projets" : "Replier les projets"}
-              aria-expanded={!projectRailCollapsed}
-              onClick={() => setProjectRailCollapsed((collapsed) => !collapsed)}
-            >
-              {projectRailCollapsed ? <CaretRight size={15} /> : <CaretLeft size={15} />}
-            </AppIconButton>
-          </div>
-          <div className="project-scroll">
-            <nav className="project-list" aria-label="Analyses récentes">
-              {activeProjectEntries.map((entry) => renderProjectEntry(entry))}
-              {!activeProjectEntries.length && !projectRailCollapsed && <p className="project-empty">Aucun projet actif</p>}
-            </nav>
-            {archivedProjectEntries.length > 0 && (
-              <section className="archive-section" aria-label="Projets archivés">
-                <button type="button" className="archive-heading" aria-expanded={archivesOpen} onClick={() => setArchivesOpen((open) => !open)}>
-                  <Archive size={14} /> Archives <span>{archivedProjectEntries.length}</span><CaretDown size={13} className={archivesOpen ? "open" : ""} />
-                </button>
-                {archivesOpen && (
-                  <nav className="project-list archived-list" aria-label="Archives">
-                    {archivedProjectEntries.map((entry) => renderProjectEntry(entry, true))}
-                  </nav>
-                )}
-              </section>
-            )}
-          </div>
-          <button className="import-button" onClick={importVideo} title="Importer un film">
-            <Plus size={30} weight="light" />
-            <span>Importer</span>
-          </button>
-          <input
-            ref={fileInputRef}
-            type="file"
-            accept={`video/*,${VIDEO_EXTENSIONS.map((extension) => `.${extension}`).join(",")}`}
-            hidden
-            onChange={(event) => importFile(event.target.files?.[0])}
-          />
-          <input
-            ref={projectInputRef}
-            type="file"
-            accept="application/json,.json,.cinecrique.json"
-            hidden
-            onChange={(event) => { importProjectFile(event.target.files?.[0]); event.target.value = ""; }}
-          />
-        </aside>
+      <div className="app-body" hidden={studioOpen || view !== "workspace"}>
+        <input
+          ref={fileInputRef}
+          type="file"
+          accept={`video/*,${VIDEO_EXTENSIONS.map((extension) => `.${extension}`).join(",")}`}
+          hidden
+          onChange={(event) => { importFile(event.target.files?.[0]); event.target.value = ""; }}
+        />
+        <input
+          ref={projectInputRef}
+          type="file"
+          accept="application/json,.json,.cinecrique.json"
+          hidden
+          onChange={(event) => { importProjectFile(event.target.files?.[0]); event.target.value = ""; }}
+        />
+        <input
+          ref={fountainInputRef}
+          type="file"
+          accept=".fountain,.spmd,.txt,text/plain"
+          hidden
+          onChange={(event) => { void importBrowserFountain(event.target.files?.[0]); event.target.value = ""; }}
+        />
 
         <section ref={workspaceRef} className="workspace" style={{ "--left-panel": `${leftPanel}%` }}>
           <section className="video-panel" aria-label="Lecteur et annotations">
@@ -3516,6 +3849,8 @@ export function App() {
                     setToast(issue);
                   }}
                 />
+              ) : projectWithoutMedia ? (
+                <div className="film-frame film-frame-empty" aria-hidden="true" />
               ) : (
                 <img className="film-frame" src="./assets/mediterranean-frame.png" alt="Plan méditerranéen du film analysé" />
               )}
@@ -3531,6 +3866,17 @@ export function App() {
                 onDelete={deleteSelectedAnnotation}
               />
               {currentSubtitle && <div className="subtitle-banner">{currentSubtitle}</div>}
+              {projectWithoutMedia && (
+                <div className="media-empty-overlay" role="status">
+                  <FilmSlate size={26} />
+                  <strong>Aucune vidéo associée</strong>
+                  <span>Le scénario et les notes sont prêts. Associez un film pour annoter ses images.</span>
+                  <div>
+                    <button type="button" onClick={nativeMode ? relinkMedia : importVideo}><FolderOpen size={15} /> Vidéo locale</button>
+                    <button type="button" onClick={() => openOnlineImport("attach")}><Globe size={15} /> Vidéo en ligne</button>
+                  </div>
+                </div>
+              )}
               {activeProject?.mediaMissing && (
                 <div className="media-missing-banner" role="alert">
                   <FilmStrip size={19} />
@@ -3901,7 +4247,51 @@ export function App() {
                   <AppIconButton label="Scène suivante" disabled={!scriptScenes.length || scene >= scriptScenes.length} onClick={() => navigateScene(1)}><CaretRight size={17} /></AppIconButton>
                 </div>
               )}
+              {activeEditorTab === "script" && (
+                <div className="editor-tool-group">
+                  <button
+                    type="button"
+                    className={`editor-tool-button ${planPicker?.target === "script" ? "active" : ""}`}
+                    data-plan-picker-trigger
+                    aria-expanded={planPicker?.target === "script"}
+                    onClick={() => setPlanPicker((current) => current?.target === "script" ? null : { target: "script" })}
+                  ><FilmStrip size={15} /> Lier un plan</button>
+                  <AppIconButton label="Importer un scénario Fountain" onClick={() => void requestFountainImport("script")}><UploadSimple size={16} /></AppIconButton>
+                </div>
+              )}
             </div>
+
+            {activeEditorTab === "script" && (
+              <div className="scene-plans" aria-label={`Plans liés à la scène ${scene}`}>
+                <span className="scene-plans-label">Plans · scène {scriptScenes.length ? scene : "—"}</span>
+                <div className="scene-plans-list">
+                  {currentScenePlans.map((link) => {
+                    const marker = markerById.get(link.markerId);
+                    return (
+                      <span key={link.markerId} className={`scene-plan-chip ${marker ? "" : "orphan"}`}>
+                        <button type="button" onClick={() => marker && seekToPlan(marker)} disabled={!marker} title={marker ? "Voir ce plan dans le film" : "Ce repère a été supprimé"}>
+                          <time>{marker ? displayTimecode(marker.time) : "—"}</time>
+                          <span>{marker?.title || link.label || "Repère supprimé"}</span>
+                        </button>
+                        <AppIconButton label="Délier ce plan du scénario" onClick={() => unlinkScenePlan(link.markerId)}><X size={12} /></AppIconButton>
+                      </span>
+                    );
+                  })}
+                  {!currentScenePlans.length && <em>Aucun plan lié. Placez le curseur dans une scène puis « Lier un plan ».</em>}
+                </div>
+              </div>
+            )}
+
+            <PlanPicker
+              open={Boolean(planPicker)}
+              title={planPicker?.target === "notes" ? "Insérer un plan dans les notes" : `Lier un plan à la scène ${scene}`}
+              markers={markers}
+              currentLabel={`${displayTimecode(currentTime)} · crée un repère si besoin`}
+              formatTimecode={displayTimecode}
+              onPick={pickPlan}
+              onClose={() => setPlanPicker(null)}
+              className={planPicker?.target === "notes" ? "for-notes" : "for-script"}
+            />
 
             {activeEditorTab === "script" ? (
               <ScriptEditor
@@ -3910,13 +4300,42 @@ export function App() {
                 onComplete={() => setToast("Complétion acceptée avec Tab")}
                 completionContext={completionContext}
                 selectionRequest={sceneSelectionRequest}
-                onSelectionChange={trackSceneAtOffset}
+                onSelectionChange={(offset) => {
+                  scriptCaretRef.current = offset;
+                  trackSceneAtOffset(offset);
+                }}
               />
             ) : activeEditorTab === "notes" ? (
-              <div className="analysis-surface">
-                <div className="analysis-title"><Note size={18} /> Analyse de la scène</div>
-                <textarea value={analysis} onChange={(event) => setAnalysis(event.target.value)} aria-label="Notes d’analyse en Markdown" maxLength={2_000_000} />
-              </div>
+              <NotesEditor
+                value={analysis}
+                onChange={setAnalysis}
+                markers={markers}
+                annotationsByMarker={annotationsByMarker}
+                annotationsForMarker={annotationsForMarker}
+                loadFrame={loadNotesFrame}
+                formatTimecode={displayTimecode}
+                formatDuration={displayDuration}
+                AnnotationCanvas={AnnotationCanvas}
+                ReadonlyOverlay={ReadonlyAnnotationOverlay}
+                onCaretChange={(offset) => { notesCaretRef.current = offset; }}
+                onSeekPlan={seekNotesPlan}
+                onRenameMarker={renameMarker}
+                onAddAnnotation={addMarkerAnnotation}
+                onUpdateAnnotation={updateMarkerAnnotation}
+                onDeleteAnnotation={deleteMarkerAnnotation}
+                header={(
+                  <div className="analysis-title">
+                    <Note size={18} /> Analyse et critique
+                    <button
+                      type="button"
+                      className={`editor-tool-button ${planPicker?.target === "notes" ? "active" : ""}`}
+                      data-plan-picker-trigger
+                      aria-expanded={planPicker?.target === "notes"}
+                      onClick={() => setPlanPicker((current) => current?.target === "notes" ? null : { target: "notes" })}
+                    ><FilmStrip size={15} /> Insérer un plan</button>
+                  </div>
+                )}
+              />
             ) : activeEditorTab === "transcript" ? (
               <TranscriptView
                 cues={subtitleCues}
@@ -3949,6 +4368,9 @@ export function App() {
                 onResetFilters={resetShotFilters}
                 loadThumbnail={loadPlanThumbnail}
                 fallbackThumbnail={projectCoverImage(activeProject) || "./assets/mediterranean-frame.png"}
+                scenes={scriptScenes}
+                sceneIndexesByMarker={sceneIndexesByMarker}
+                onSceneChange={changePlanScene}
                 formatTimecode={displayTimecode}
                 formatDuration={displayDuration}
               />
@@ -4072,14 +4494,14 @@ export function App() {
       >
         <CircleNotch size={25} className="media-preparation-spinner" aria-hidden="true" />
         <div className="media-preparation-copy">
-          <span>Traitement entièrement local</span>
-          <h2 id="media-preparation-title">Préparation du média</h2>
+          <span>{mediaPreparation?.stage === "download" ? "Import en ligne" : "Traitement entièrement local"}</span>
+          <h2 id="media-preparation-title">{mediaPreparation?.stage === "download" ? "Téléchargement de la vidéo" : "Préparation du média"}</h2>
           <strong>{mediaPreparation?.name}</strong>
           <p>{mediaPreparation?.cancelling ? "Annulation en cours…" : mediaPreparation?.message}</p>
         </div>
         <progress value={mediaPreparation?.progress || 0} max="1" aria-label="Progression de la préparation du média" />
         <span className="media-preparation-value">{Math.round((mediaPreparation?.progress || 0) * 100)} %</span>
-        <small>Le fichier vidéo original reste inchangé.</small>
+        <small>{mediaPreparation?.stage === "download" ? "La vidéo est enregistrée dans Films › Cinécrique." : "Le fichier vidéo original reste inchangé."}</small>
         {mediaPreparation?.cancellable && (
           <button ref={mediaPreparationCancelRef} type="button" onClick={() => void cancelMediaPreparation()}>Annuler</button>
         )}

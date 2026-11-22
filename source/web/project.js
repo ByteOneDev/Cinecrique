@@ -4,6 +4,9 @@ import { normalizeTimecodeSettings } from "./timecode.js";
 import { normalizeComparison } from "./comparison.js";
 import { migrateAnnotationTimes } from "./annotations.js";
 import { normalizeProjectCover } from "./covers.js";
+import { normalizeOnlineOptions } from "./online.js";
+
+const LAUNCHER_SORT_VALUES = new Set(["recent", "title", "created"]);
 
 export const PROJECT_DATA_LIMITS = Object.freeze({
   projects: 500,
@@ -284,6 +287,7 @@ export function migratePersistedState(state, frameRateForProject = () => 24) {
     if (!originalProjectIds.has(originalId)) originalProjectIds.set(originalId, id);
     migratedToOriginalProjectIds.set(id, originalId);
     const safeProject = cloneSafeValue(project);
+    if (!(Number.isFinite(Number(project.lastOpenedAt)) && Number(project.lastOpenedAt) > 0)) delete safeProject.lastOpenedAt;
     return {
       ...safeProject,
       id,
@@ -292,6 +296,7 @@ export function migratePersistedState(state, frameRateForProject = () => 24) {
       poster: String(project.poster || "./assets/poster-coast.png"),
       cover: normalizeProjectCover(project.cover, project.poster),
       archived: Boolean(project.archived),
+      ...(Number.isFinite(Number(project.lastOpenedAt)) && Number(project.lastOpenedAt) > 0 ? { lastOpenedAt: Number(project.lastOpenedAt) } : {}),
       timecode: normalizeTimecodeSettings(project.timecode, frameRateForProject(project)),
     };
   });
@@ -318,6 +323,8 @@ export function migratePersistedState(state, frameRateForProject = () => 24) {
       projectRailCollapsed: Boolean(state.preferences?.projectRailCollapsed),
       muted: Boolean(state.preferences?.muted),
       shortcuts: normalizeShortcuts(state.preferences?.shortcuts),
+      launcherSort: LAUNCHER_SORT_VALUES.has(state.preferences?.launcherSort) ? state.preferences.launcherSort : "recent",
+      onlineImport: normalizeOnlineOptions(state.preferences?.onlineImport),
     },
   };
 }
